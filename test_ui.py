@@ -22,10 +22,19 @@ verifie trois choses :
 Aucune dependance nouvelle : `simple_websocket` arrive avec `flask-sock`, et
 le navigateur est celui de la machine. Sans Chrome installe, le banc le dit et
 ne pretend pas avoir verifie quoi que ce soit.
+
+Le banc ne demande aucun codec proprietaire. Ses rushes sont en VP9, que tout
+navigateur decode ; le format des copies de lecture est demande au serveur
+d'apres ce que le navigateur trouve annonce. Un Chromium nu -- celui de
+Playwright, ceux des paquets Linux, ceux des integrations continues -- verifie
+donc exactement la meme chose qu'un Chrome complet. `LIVE_NOTES_PROXY_FORMAT`
+reste respecte quand on veut examiner un format precis ; c'est le seul cas ou
+un test peut encore s'abstenir faute de decodeur.
 """
 
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -37,7 +46,6 @@ import urllib.request
 
 import simple_websocket
 
-import proxy
 import renderer
 import session as sessions
 
@@ -83,12 +91,27 @@ class Browser:
 
     def __init__(self, chrome, profile):
         self.port = free_port()
-        self.proc = subprocess.Popen([
+        flags = [
             chrome, "--headless=new", "--disable-gpu", "--no-first-run",
             "--no-default-browser-check", "--disable-extensions",
+            # Le banc n'a pas de doigt : sans cela `play()` est refuse, et tout
+            # ce qui se verifie *pendant* une lecture -- l'arret sur le point
+            # OUT, un trace enregistre -- ne pourrait jamais l'etre.
+            "--autoplay-policy=no-user-gesture-required",
+            # Une fenetre sans surface visible voit ses minuteries ralenties : le
+            # decompte de trois secondes du REC en durerait sept.
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
             "--remote-debugging-port=%d" % self.port,
-            "--user-data-dir=" + profile, "about:blank",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            "--user-data-dir=" + profile,
+        ]
+        # Une machine peut avoir besoin d'un drapeau de plus (`--no-sandbox` sous
+        # root dans un conteneur, par exemple) : c'est de sa configuration qu'il
+        # releve, pas du banc.
+        flags += shlex.split(os.environ.get("LIVE_NOTES_CHROME_FLAGS", ""))
+        self.proc = subprocess.Popen(flags + ["about:blank"],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
 
         target = None
         for _ in range(60):
@@ -150,7 +173,16 @@ class Browser:
         self.pump(3.5)
 
     def click(self, element_id):
-        self.js("document.getElementById('%s').click()" % element_id)
+        self.call("Runtime.evaluate", wait=1.0, userGesture=True, returnByValue=True,
+                  expression="document.getElementById('%s').click()" % element_id)
+
+    def input(self, method, **params):
+        """Un evenement d'entree reel, sans attendre la reponse.
+
+        Un trace se joue a la cadence du stylet : attendre l'accuse de chaque
+        point etirerait le geste bien au-dela de ce qu'il doit durer.
+        """
+        self.send(method, **params)
 
     def text(self, element_id):
         return self.js("document.getElementById('%s').textContent" % element_id)
@@ -167,13 +199,20 @@ class Browser:
         self.call("DOM.setFileInputFiles",
                   nodeId=node.get("nodeId"), files=[path])
 
-    def wait_for(self, expression, timeout=6.0):
-        """Attend qu'une expression devienne vraie plutot que de dormir."""
+    def wait_for(self, expression, timeout=6.0, step=0.4):
+        """Attend qu'une expression devienne vraie plutot que de dormir.
+
+        `step` est la duree d'ecoute de chaque tour. La valeur par defaut suffit
+        a attendre un etat qui, une fois acquis, ne repart pas. Guetter un
+        instant qui passe -- une lecture qui vient de demarrer, et qui ne durera
+        qu'une seconde ou deux -- demande un pas plus court.
+        """
         end = time.time() + timeout
         while time.time() < end:
-            if self.js(expression, wait=0.4):
+            if self.js(expression, wait=step):
                 return True
-            self.pump(0.3)
+            if step >= 0.3:
+                self.pump(0.3)
         return False
 
     def exceptions(self):
@@ -197,10 +236,16 @@ class Browser:
 # -------------------------------------------------------------------- serveur
 
 class Server:
-    def __init__(self):
+    def __init__(self, proxy_format):
         self.port = free_port()
+        # Le format des copies de lecture est celui que le navigateur du banc
+        # sait decoder : servir un proxy H.264 a un Chromium qui n'a pas ce
+        # codec ne prouverait rien de l'application, et c'est pourtant le
+        # lecteur -- pas le codec -- que les tests concernes examinent.
+        self.proxy_format = proxy_format
         env = dict(os.environ, LIVE_NOTES_PORT=str(self.port),
-                   LIVE_NOTES_HOST="0.0.0.0")
+                   LIVE_NOTES_HOST="0.0.0.0",
+                   LIVE_NOTES_PROXY_FORMAT=proxy_format)
         self.proc = subprocess.Popen([sys.executable, "app.py"], cwd=REPO,
                                      env=env, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
@@ -240,29 +285,25 @@ def make_pdf(name):
     return path
 
 
-def make_rush(name, size):
-    """Un vrai fichier, lisible par le navigateur : le banc ne simule rien."""
-    path = os.path.join(TMP, name)
-    subprocess.run([renderer.FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-                    "-f", "lavfi", "-i",
-                    "testsrc=size=%s:rate=25:duration=2" % size,
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", path], check=True)
-    return path
+def make_rush(name, size, seconds=2, rate=25):
+    """Un vrai fichier, lisible par le navigateur : le banc ne simule rien.
 
+    VP9 dans un WebM, et non H.264 : les builds « Chromium » nus n'ont pas les
+    codecs proprietaires (voir `h264_available`), et c'est justement le lecteur
+    -- timecode, bornes IN/OUT, tete de lecture, cadrage -- qu'on ne pourrait
+    alors jamais verifier. Aucun de ces tests ne porte sur le codec : ils
+    portent sur ce que l'application fait d'un rush qui s'affiche. Dependre
+    d'un format que la moitie des navigateurs refusent, c'etait donc renoncer a
+    les verifier la ou ils sont le plus utiles.
 
-def make_open_rush(name, size, seconds=2):
-    """Meme chose, dans un codec que *tout* navigateur decode.
-
-    Les builds « Chromium » nus n'ont pas H.264 (voir `h264_available`), et
-    c'est justement le lecteur -- timecode, bornes IN/OUT, tete de lecture --
-    qu'on ne pourrait alors jamais verifier sur ce banc. VP9 dans un WebM est
-    libre : il decode partout, et le transport ne fait aucune difference entre
-    les deux.
+    `rate` sert a fabriquer un rush qui n'est *pas* a la cadence du projet :
+    c'est le cas de travail ordinaire (un rush 24 dans un projet 25) et il ne
+    doit pas passer inapercu.
     """
     path = os.path.join(TMP, name)
     subprocess.run([renderer.FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                     "-f", "lavfi", "-i",
-                    "testsrc=size=%s:rate=25:duration=%d" % (size, seconds),
+                    "testsrc=size=%s:rate=%d:duration=%d" % (size, rate, seconds),
                     "-c:v", "libvpx-vp9", "-b:v", "400k", "-pix_fmt", "yuv420p",
                     path], check=True)
     return path
@@ -311,8 +352,6 @@ def test_the_qr_image_is_really_served(ctx):
 
 def test_a_mismatched_ratio_asks_how_to_place_the_media(ctx):
     page = ctx["page"]
-    if not ctx["h264"]:
-        raise Skipped("navigateur sans H.264 : le rush ne decode pas")
     page.attach_file("media-input", ctx["rush43"])
     assert page.wait_for(
         "getComputedStyle(document.getElementById('crop-screen')).display === 'flex'"
@@ -324,11 +363,12 @@ def test_cropping_travels_to_the_tablet(ctx):
     # Le coeur du mode tablette : sans cette publication, le poste recadre et
     # la tablette montre autre chose.
     page = ctx["page"]
-    # Sans la fenetre de cadrage ouverte par le test precedent, il n'y a rien
-    # a valider : piloter ses controles a vide ne prouverait rien et laisserait
-    # une exception derriere soi.
-    if not ctx["h264"]:
-        raise Skipped("navigateur sans H.264 : pas de fenetre de cadrage ouverte")
+    # La fenetre de cadrage est celle que le test precedent a ouverte : piloter
+    # ses controles a vide ne prouverait rien et laisserait une exception
+    # derriere soi.
+    assert page.js(
+        "getComputedStyle(document.getElementById('crop-screen')).display === 'flex'"
+    ), "la fenetre de cadrage n'est pas ouverte : il n'y a rien a valider"
     page.js("var m = document.getElementById('crop-mode');"
             "m.value = 'crop'; m.dispatchEvent(new Event('change'));")
     page.click("crop-apply")
@@ -557,12 +597,14 @@ def test_the_bounds_survive_a_proxy_swap(ctx):
     entiere -- les bornes posees a la main disparaissaient au moment ou l'on
     armait le mode tablette.
     """
-    # La copie est transcodee dans le format de proxy du serveur : un banc dont
-    # le navigateur n'a pas ce codec ne verrait jamais le nouveau rush arriver a
-    # l'ecran, et l'echec parlerait du navigateur, pas des bornes.
-    if not ctx["h264"] and proxy.PROXY_FORMAT == "h264":
-        raise Skipped("navigateur sans H.264 : la copie de lecture ne decoderait"
-                      " pas (LIVE_NOTES_PROXY_FORMAT=vp9 leve la limite)")
+    # La copie est transcodee dans le format de proxy du serveur, choisi au
+    # demarrage pour que ce navigateur-ci sache le decoder (voir `Server`). Il
+    # n'y a plus qu'un cas ou la copie n'arriverait pas a l'ecran : un format
+    # impose a la main que le navigateur refuse -- et l'echec parlerait alors du
+    # navigateur, pas des bornes.
+    if ctx["server"].proxy_format == "h264" and not ctx["h264"]:
+        raise Skipped("LIVE_NOTES_PROXY_FORMAT=h264 impose a un navigateur qui"
+                      " n'a pas ce codec : la copie de lecture ne decoderait pas")
 
     page = ctx["page"]
     page.js("window.MediaTransport.setRange(0.4, 1.2);")
@@ -657,6 +699,433 @@ def test_pairing_closes_itself_once_the_tablet_has_the_stylus(ctx):
             " body: JSON.stringify({action: 'end'})});")
     page.pump(1.2)
     return "tablette connectee -> QR referme, reouverture toujours possible"
+
+
+# ------------------------------------------------ lecteur : arret sur le OUT
+
+FPS = 25
+
+
+def type_timecode(page, field_id, value):
+    """Saisit un timecode dans un champ du transport, comme au clavier.
+
+    Passer par le champ plutot que par `setRange` compte : c'est la seule facon
+    de verifier que ce que l'on tape, ce que l'outil retient et ce qu'il redit
+    sont bien la meme image.
+    """
+    page.js(
+        "(function () {"
+        "  var field = document.getElementById(%s);"
+        "  field.value = %s;"
+        "  field.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));"
+        "})()" % (json.dumps(field_id), json.dumps(value)))
+    page.pump(0.3)
+
+
+def shown_frame(page):
+    """Numero de l'image reellement presentee par le lecteur.
+
+    L'image d'un instant est celle dont l'intervalle le contient : une division
+    entiere, jamais un arrondi -- c'est justement l'arrondi qui faisait dire au
+    timecode une image et a l'ecran une autre.
+    """
+    value = page.js("(function () {"
+                    "  var node = document.getElementById('bg-media');"
+                    "  if (!node || typeof node.currentTime !== 'number') return -1;"
+                    "  var at = window.__realTime ? window.__realTime() : node.currentTime;"
+                    "  return Math.floor(at * %d + 1e-6);"
+                    "})()" % FPS)
+    return int(value) if value is not None else -1
+
+
+def watch_presented_frames(page):
+    """Note chaque image que le lecteur presente reellement a l'ecran.
+
+    `requestVideoFrameCallback` est le seul temoin d'une image fantome : elle ne
+    dure qu'une image, et `currentTime` -- qui est justement ce qui retarde --
+    ne la voit pas passer.
+    """
+    page.js("window.__frames = [];"
+            "(function () {"
+            "  var node = document.getElementById('bg-media');"
+            "  if (!node || !node.requestVideoFrameCallback) return;"
+            "  function next(now, meta) {"
+            "    window.__frames.push(meta.mediaTime);"
+            "    node.requestVideoFrameCallback(next);"
+            "  }"
+            "  node.requestVideoFrameCallback(next);"
+            "})()")
+
+
+def last_presented_frame(page):
+    value = page.js("window.__frames && window.__frames.length"
+                    " ? Math.floor(Math.max.apply(null, window.__frames) * %d + 1e-6)"
+                    " : -1" % FPS)
+    return int(value) if value is not None else -1
+
+
+def lag_the_player_clock(page, seconds=0.06):
+    """Fait retarder `currentTime` sur ce qui est reellement a l'ecran.
+
+    C'est la situation d'une tablette : le rush arrive par le reseau, le
+    decodeur avance par a-coups et rattrape en rafale, et l'horloge du lecteur
+    ne dit plus quelle image le compositeur vient de presenter. Surveiller la
+    fin de plage a cette horloge-la revient donc a s'arreter trop tard -- une
+    image de trop passe a l'ecran avant le retour en arriere.
+
+    Le banc ne peut pas provoquer un hoquet reseau a la milliseconde pres ; il
+    reproduit son effet, qui est exactement celui-la. `window.__realTime` garde
+    la verite pour les mesures.
+    """
+    page.js("(function () {"
+            "  var node = document.getElementById('bg-media');"
+            "  var real = Object.getOwnPropertyDescriptor("
+            "    HTMLMediaElement.prototype, 'currentTime');"
+            "  window.__realTime = function () { return real.get.call(node); };"
+            "  Object.defineProperty(node, 'currentTime', {"
+            "    configurable: true,"
+            "    get: function () {"
+            "      var at = real.get.call(this);"
+            "      return this.paused ? at : Math.max(0, at - %f);"
+            "    },"
+            "    set: function (value) { real.set.call(this, value); }"
+            "  });"
+            "})()" % seconds)
+
+
+def unlag_the_player_clock(page):
+    page.js("(function () {"
+            "  var node = document.getElementById('bg-media');"
+            "  if (node) delete node.currentTime;"
+            "  window.__realTime = null;"
+            "})()")
+
+
+def test_the_out_point_names_the_image_it_freezes(ctx):
+    """Le point OUT designe une image, et c'est celle-la qui reste a l'ecran.
+
+    Au montage, le point de sortie se pose sur la *derniere* image du plan, pas
+    sur la premiere du plan suivant. La borne etait pourtant tenue pour une fin
+    exclusive : le lecteur se garait une image avant celle qu'on lui avait
+    designee. Et le timecode affiche, arrondi a l'image la plus proche au lieu
+    d'etre lu sur celle qui est presentee, pouvait annoncer l'une pendant que
+    l'ecran montrait l'autre -- d'ou l'impression d'une borne « instable ».
+    """
+    page = ctx["page"]
+    open_on_server(ctx, ctx["rush_open_long"])
+    type_timecode(page, "tp-in-tc", "00:00:00:10")
+    type_timecode(page, "tp-out-tc", "00:00:01:05")
+
+    redit = page.js("document.getElementById('tp-out-tc').value")
+    assert redit == "00:00:01:05", "le champ redit %s au lieu du timecode pose" % redit
+
+    page.js("window.MediaTransport.parkAtOut();")
+    assert page.wait_for("Math.floor(document.getElementById('bg-media')"
+                         ".currentTime * %d + 1e-6) === 30" % FPS, timeout=6.0), \
+        "image figee %d au lieu de l'image 30 (00:00:01:05)" % shown_frame(page)
+
+    lu = page.js("document.getElementById('tp-current').textContent")
+    assert lu == "00:00:01:05", \
+        "l'ecran montre l'image 30 et le timecode annonce %s" % lu
+
+    # Une image de plus doit changer l'image *et* le timecode, du meme pas :
+    # c'est ce que l'on verifie a la main quand on doute de la borne.
+    page.click("tp-frame-fwd")
+    page.pump(0.8)
+    assert shown_frame(page) == 31, \
+        "une image en avant mene a l'image %d, pas a la 31" % shown_frame(page)
+    lu = page.js("document.getElementById('tp-current').textContent")
+    assert lu == "00:00:01:06", "une image en avant annonce %s" % lu
+    return "OUT 00:00:01:05 -> image 30 figee, timecode en face"
+
+
+def test_a_late_player_clock_never_shows_the_image_after_the_out(ctx):
+    """L'image fantome : celle d'apres le point OUT, montree une image durant.
+
+    La fin de plage etait guettee sur `currentTime`. Or cette horloge retarde
+    sur ce que le compositeur affiche des que le decodeur avance par a-coups --
+    ce que fait un lecteur de tablette servi par le reseau. On s'arretait donc
+    apres avoir presente l'image *suivante*, puis on revenait en arriere : une
+    image fantome, suivie de la bonne. Il faut lire l'image presentee, pas
+    l'heure qu'il est.
+    """
+    page = ctx["page"]
+    open_on_server(ctx, ctx["rush_open_long"])
+    type_timecode(page, "tp-in-tc", "00:00:00:10")
+    type_timecode(page, "tp-out-tc", "00:00:01:20")
+
+    lag_the_player_clock(page)
+    try:
+        watch_presented_frames(page)
+        page.click("btn-rec")
+        assert page.wait_for("document.body.classList.contains('recording')",
+                             timeout=10.0, step=0.2), "l'enregistrement n'a pas demarre"
+        assert page.wait_for("!document.body.classList.contains('recording')",
+                             timeout=20.0, step=0.2), "l'enregistrement ne s'est pas arrete"
+        page.pump(1.2)
+
+        presented = last_presented_frame(page)
+        assert presented != -1, "aucune image presentee : le test ne prouve rien"
+        assert presented <= 45, \
+            ("l'image %d a ete presentee alors que la plage s'arrete a la 45 :"
+             " image fantome" % presented)
+        assert page.wait_for("Math.floor(window.__realTime() * %d + 1e-6) === 45" % FPS,
+                             timeout=6.0), \
+            "image figee %d au lieu de la 45" % shown_frame(page)
+    finally:
+        unlag_the_player_clock(page)
+    return "horloge en retard d'une image et demie : rien au-dela de l'image 45"
+
+
+def test_a_rush_off_the_project_cadence_says_so(ctx):
+    """Un rush 24 dans un projet 25 : les images des deux ne coincident pas.
+
+    Les bornes se calent sur la grille d'images du *projet*. Un rush qui n'a pas
+    cette cadence n'a pas d'image a ces instants-la : le point OUT tombe au
+    milieu d'une image du rush, celle qui se fige n'est pas celle qu'on a
+    designee, et rien ne le dit. La cadence du projet est un choix de depart --
+    encore faut-il savoir qu'il est a refaire.
+    """
+    page = ctx["page"]
+    open_on_server(ctx, ctx["rush_24"])
+    assert page.wait_for(
+        "getComputedStyle(document.getElementById('tp-cadence')).display !== 'none'",
+        timeout=10.0), "aucune alerte sur un rush 24 dans un projet 25"
+    said = page.text("tp-cadence")
+    assert "24" in said and "25" in said, \
+        "l'alerte ne dit pas les deux cadences : %s" % said
+
+    # Et elle se tait des que le rush est a la cadence du projet.
+    open_on_server(ctx, ctx["rush_open_long"])
+    assert page.wait_for(
+        "getComputedStyle(document.getElementById('tp-cadence')).display === 'none'",
+        timeout=10.0), "l'alerte reste affichee sur un rush a la bonne cadence"
+    return "rush 24 signale, rush 25 silencieux"
+
+
+# -------------------------------------- tablette : le trace deborde le OUT
+
+def tablet_takes_the_stylus(ctx):
+    """Ouvre une vraie tablette sur la session et attend qu'elle ait le stylet."""
+    addresses = sessions.lan_addresses()
+    if not addresses:
+        raise Skipped("aucune adresse LAN sur cette machine")
+
+    page = ctx["page"]
+    tablet = ctx["lan_page"]
+    page.click("btn-tablet")
+    assert page.wait_for(
+        "getComputedStyle(document.getElementById('tablet-screen')).display === 'flex'"
+    ), "la fenetre d'appairage ne s'est pas ouverte"
+
+    state = ctx["server"].get("/api/session") or {}
+    token = (state.get("pairing") or {}).get("token")
+    assert token, "pas de jeton d'appairage : le test ne prouverait rien"
+
+    tablet.goto("http://%s:%d/tablet#%s"
+                % (addresses[0], ctx["server"].port, token))
+
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        current = ctx["server"].get("/api/session") or {}
+        if current.get("mode") == "live" and current.get("controller") == "tablet":
+            break
+        time.sleep(0.3)
+    else:
+        raise AssertionError("la tablette n'a pas pris la main")
+
+    page.click("tablet-close")
+    return tablet
+
+
+def end_tablet_session(ctx, tablet):
+    tablet.goto("about:blank")
+    ctx["page"].js("fetch('/api/session/tablet', {method: 'POST',"
+                   " headers: {'Content-Type': 'application/json'},"
+                   " body: JSON.stringify({action: 'end'})});")
+    ctx["page"].pump(1.2)
+
+
+def draw_across(tablet, seconds):
+    """Un trait continu, du doigt, pendant `seconds` -- sans jamais le lever.
+
+    Les evenements sont ceux du navigateur, pas des appels a l'API de dessin :
+    c'est la chaine complete que l'on veut, capture comprise.
+    """
+    box = tablet.js("(function () {"
+                    "  var r = document.getElementById('drawing-canvas')"
+                    "    .getBoundingClientRect();"
+                    "  return [r.left, r.top, r.width, r.height].join(',');"
+                    "})()")
+    left, top, width, height = [float(value) for value in box.split(",")]
+    y = top + height * 0.5
+    start_x = left + width * 0.25
+    travel = width * 0.5
+
+    tablet.input("Input.dispatchMouseEvent", type="mousePressed", x=start_x, y=y,
+                 button="left", buttons=1, clickCount=1)
+    began = time.time()
+    while True:
+        gone = time.time() - began
+        if gone >= seconds:
+            break
+        tablet.input("Input.dispatchMouseEvent", type="mouseMoved",
+                     x=start_x + travel * (gone / seconds), y=y,
+                     button="left", buttons=1)
+        time.sleep(0.03)
+    tablet.input("Input.dispatchMouseEvent", type="mouseReleased",
+                 x=start_x + travel, y=y, button="left", buttons=0, clickCount=1)
+    tablet.pump(0.8)
+
+
+def captured_export(page):
+    """Ce que le poste enverrait au moteur de rendu, intercepte avant le depart.
+
+    C'est la seule mesure qui compte : le trace tel qu'il sera exporte, et non
+    ce que l'ecran a bien voulu afficher au passage.
+    """
+    # `alert()` bloque le moteur de rendu tant que personne ne la referme, et le
+    # banc n'a pas de main pour cela : plus aucune evaluation ne repondrait.
+    page.js("window.__alerts = [];"
+            "window.__realAlert = window.__realAlert || window.alert;"
+            "window.alert = function (text) { window.__alerts.push(text); };")
+    page.js("window.__exported = null;"
+            "window.__realFetch = window.__realFetch || window.fetch;"
+            "window.fetch = function (url, options) {"
+            "  if (String(url).indexOf('/api/export') === 0 && options && options.body) {"
+            "    window.__exported = JSON.parse(options.body);"
+            "    return Promise.resolve(new Response('{\"error\": \"banc\"}',"
+            "      {status: 200, headers: {'Content-Type': 'application/json'}}));"
+            "  }"
+            "  return window.__realFetch.apply(window, arguments);"
+            "};")
+    page.click("btn-export")
+    page.pump(0.5)
+    page.click("export-go")
+    page.pump(1.5)
+    summary = page.js(
+        "(function () {"
+        "  var data = window.__exported;"
+        "  if (!data) return '';"
+        "  var gap = 0, last = 0, first = null;"
+        "  data.strokes.forEach(function (item) {"
+        # Le trou se mesure *dans* un trace, entre deux points consecutifs : le
+        # silence qui precede le premier point n'en est pas un.
+        "    var previous = null;"
+        "    item.points.forEach(function (point) {"
+        "      if (first === null) first = point.t;"
+        "      if (previous !== null && point.t - previous > gap) gap = point.t - previous;"
+        "      previous = point.t;"
+        "      if (point.t > last) last = point.t;"
+        "    });"
+        "  });"
+        "  return [data.strokes.length, first === null ? -1 : first, last, gap,"
+        "          data.durationMs].join(',');"
+        "})()")
+    page.js("window.fetch = window.__realFetch;"
+            "window.alert = window.__realAlert;"
+            "document.getElementById('render-overlay').style.display = 'none';")
+    assert summary, (
+        "l'export n'a pas ete declenche : rien a mesurer (bouton %s, fenetre %s,"
+        " etat « %s »)" % (
+            "inactif" if page.js("document.getElementById('btn-export').disabled")
+            else "actif",
+            page.display("export-screen"), page.text("status")))
+    parts = summary.split(",")
+    return {"strokes": int(parts[0]), "first": float(parts[1]),
+            "last": float(parts[2]), "gap": float(parts[3]),
+            "duration": float(parts[4])}
+
+
+def test_a_stroke_across_the_out_point_reaches_the_pc_whole(ctx):
+    """Le scenario complet : tablette, bornes IN/OUT, trait qui deborde le OUT.
+
+    Trois choses se jouent au moment precis ou le rush atteint sa derniere
+    image, et les trois se voyaient :
+
+    1. le lecteur de la tablette presentait l'image *suivante* pendant une
+       image -- l'« image fantome » -- avant de revenir en arriere sur la bonne ;
+    2. l'image qui restait figee n'etait pas celle du point OUT ;
+    3. la fin d'enregistrement scellait, chez le poste, le trace encore en
+       cours : la suite du meme geste -- celle qui se dessine sur l'image figee,
+       et que l'on veut exporter -- n'arrivait jamais. Sur la tablette, le trait
+       restait pourtant continu : la coupure ne se voyait qu'a l'arrivee.
+    """
+    page = ctx["page"]
+    open_on_server(ctx, ctx["rush_open_long"])
+    type_timecode(page, "tp-in-tc", "00:00:00:10")
+    type_timecode(page, "tp-out-tc", "00:00:02:12")
+
+    tablet = tablet_takes_the_stylus(ctx)
+    try:
+        assert tablet.wait_for("!!window.MediaTransport && window.MediaTransport.isTimed()"
+                               " && window.MediaTransport.duration() > 0", timeout=30.0), \
+            "le rush n'est pas arrive sur la tablette"
+        assert tablet.wait_for(
+            "document.getElementById('tp-out-tc').value === '00:00:02:12'", timeout=15.0), \
+            ("les bornes du poste ne sont pas arrivees sur la tablette : OUT a %s"
+             % tablet.js("document.getElementById('tp-out-tc').value"))
+
+        span = float(tablet.js("(window.MediaTransport.outPoint()"
+                               " - window.MediaTransport.inPoint()) + ''"))
+        start = float(tablet.js("window.MediaTransport.inPoint() + ''"))
+
+        # Ce qui est reellement presente a l'ecran, image par image.
+        watch_presented_frames(tablet)
+
+        tablet.click("btn-rec")
+        assert tablet.wait_for(
+            "(function () {"
+            "  var node = document.getElementById('bg-media');"
+            "  return !!node && !node.paused && node.currentTime >= %f;"
+            "})()" % (start + 0.04), timeout=15.0, step=0.12), \
+            "la lecture n'a pas demarre sur la tablette apres le decompte"
+
+        # Le geste enjambe le point OUT et continue franchement au-dela : c'est
+        # cette part-la, tracee sur l'image figee, qui disparaissait.
+        draw_across(tablet, span + 1.2)
+
+        assert tablet.wait_for("!document.body.classList.contains('recording')",
+                               timeout=10.0), \
+            "l'enregistrement ne s'est pas arrete sur la tablette"
+
+        presented = last_presented_frame(tablet)
+        assert presented != -1, "aucune image presentee : le test ne prouve rien"
+        assert presented <= 62, \
+            ("l'image %d a ete presentee alors que la plage s'arrete a la 62 :"
+             " image fantome" % presented)
+
+        assert tablet.wait_for("Math.floor(document.getElementById('bg-media')"
+                               ".currentTime * %d + 1e-6) === 62" % FPS, timeout=8.0), \
+            "la tablette fige l'image %d au lieu de la 62" % shown_frame(tablet)
+
+        # Le poste reprend la main, puis exporte : c'est le parcours decrit.
+        page.js("fetch('/api/session/tablet', {method: 'POST',"
+                " headers: {'Content-Type': 'application/json'},"
+                " body: JSON.stringify({action: 'take'})});")
+        assert page.wait_for("!document.body.classList.contains('viewing')",
+                             timeout=10.0), "le poste n'a pas repris la main"
+        page.pump(0.8)
+
+        got = captured_export(page)
+    finally:
+        end_tablet_session(ctx, tablet)
+
+    assert got["strokes"] == 1, \
+        ("%d traces recus pour un seul geste : le trait a ete coupe"
+         % got["strokes"])
+    beyond = got["last"] - span * 1000.0
+    assert beyond > 400.0, \
+        ("le trace s'arrete %.0f ms apres le point OUT : la part dessinee sur"
+         " l'image figee n'est pas arrivee (dernier point a %.0f ms, plage de"
+         " %.0f ms)" % (beyond, got["last"], span * 1000.0))
+    assert got["gap"] < 400.0, \
+        "un trou de %.0f ms au milieu du trace recu" % got["gap"]
+    assert got["duration"] >= got["last"] - 1.0, \
+        ("la duree exportee (%.0f ms) coupe le trace (%.0f ms)"
+         % (got["duration"], got["last"]))
+    return ("trait continu de %.0f ms recu entier, %.0f ms au-dela du OUT ;"
+            " aucune image au-dela de la 62" % (got["last"], beyond))
 
 
 def test_the_tablet_buttons_are_not_deaf_to_the_finger(ctx):
@@ -771,7 +1240,7 @@ def test_a_lan_screen_is_told_it_is_not_the_pc(ctx):
 
 def test_a_stopped_server_says_so(ctx):
     """La panne signalee : l'interface reste a l'ecran et parait vivante."""
-    server = Server()
+    server = Server(ctx["server"].proxy_format)
     page = Browser(ctx["chrome"], os.path.join(TMP, "profil_arret"))
     try:
         page.goto(server.url)
@@ -808,6 +1277,10 @@ TESTS = [
     test_the_bounds_survive_a_proxy_swap,
     test_another_rush_does_not_inherit_the_bounds,
     test_pairing_closes_itself_once_the_tablet_has_the_stylus,
+    test_the_out_point_names_the_image_it_freezes,
+    test_a_late_player_clock_never_shows_the_image_after_the_out,
+    test_a_rush_off_the_project_cadence_says_so,
+    test_a_stroke_across_the_out_point_reaches_the_pc_whole,
     test_the_tablet_buttons_are_not_deaf_to_the_finger,
     test_the_toolbar_holds_on_one_row,
     test_the_tool_buttons_keep_their_icon,
@@ -825,11 +1298,14 @@ def h264_available(page):
     """Chromium n'embarque pas toujours H.264.
 
     Les builds « Chromium » nus (celui de Playwright, la plupart des paquets
-    Linux) sont livres sans codecs proprietaires, la ou Chrome et Edge les
-    ont. Un rush en H.264 n'y decode pas : `videoWidth` reste a zero,
-    `onMediaReady` ne part jamais, et tout ce qui depend d'un media a l'ecran
-    tombe. C'est une lacune du navigateur, pas de l'application -- la faire
-    passer pour un echec enverrait chercher au mauvais endroit.
+    Linux) sont livres sans codecs proprietaires, la ou Chrome et Edge les ont.
+    Un rush en H.264 n'y decode pas : `videoWidth` reste a zero, `onMediaReady`
+    ne part jamais, et tout ce qui depend d'un media a l'ecran tombe.
+
+    Le banc ne demande plus ce codec a personne -- ses rushes sont en VP9, que
+    tout navigateur decode. Reste la seule chose qu'il ne fabrique pas lui-meme :
+    le format des copies de lecture, decide par le serveur. La reponse sert donc
+    a le choisir, une fois, au demarrage.
     """
     return bool(page.js(
         "!!document.createElement('video')"
@@ -849,22 +1325,41 @@ def main():
     lan_page = None
     failures = 0
     skipped = 0
+    chosen = TESTS
     try:
-        server = Server()
+        # Les navigateurs d'abord : c'est ce que celui-ci sait decoder qui
+        # decide du format des copies de lecture, donc de l'environnement du
+        # serveur. Un format impose a la main est respecte tel quel -- c'est
+        # alors le codec lui-meme que l'on vient verifier.
         page = Browser(chrome, os.path.join(TMP, "profil"))
         lan_page = Browser(chrome, os.path.join(TMP, "profil_lan"))
+        h264 = h264_available(page)
+        proxy_format = (os.environ.get("LIVE_NOTES_PROXY_FORMAT")
+                        or ("h264" if h264 else "vp9"))
+        if not h264 and proxy_format != "h264":
+            print("  (ce navigateur n'a pas H.264 : les copies de lecture sont"
+                  " demandees en %s.)" % proxy_format)
+        elif not h264:
+            print("  (ce navigateur n'a pas H.264, mais LIVE_NOTES_PROXY_FORMAT"
+                  " impose ce format : la copie de lecture ne s'y verifiera pas.)")
+
+        server = Server(proxy_format)
         ctx = {"server": server, "page": page, "lan_page": lan_page,
-               "chrome": chrome, "rush43": make_rush("rush43.mp4", "640x480"),
-               "rush_open": make_open_rush("rush_libre.webm", "640x360"),
-               "rush_open_long": make_open_rush("rush_libre_long.webm", "640x360", 4),
+               "chrome": chrome, "h264": h264,
+               "rush43": make_rush("rush43.webm", "640x480"),
+               "rush_open": make_rush("rush_libre.webm", "640x360"),
+               "rush_open_long": make_rush("rush_libre_long.webm", "640x360", 4),
+               "rush_24": make_rush("rush_24.webm", "640x360", 4, rate=24),
                "pdf": make_pdf("document.pdf")}
 
-        ctx["h264"] = h264_available(page)
-        if not ctx["h264"]:
-            print("  (ce navigateur n'a pas H.264 : les tests qui exigent un")
-            print("   rush video seront IGNORES, pas comptes comme des echecs.)")
+        # `py test_ui.py <bout de nom>` ne rejoue qu'une partie du banc. La
+        # creation de l'espace de travail reste en tete : tout le reste s'y
+        # appuie, et un banc qui « passe » sans elle ne prouverait rien.
+        wanted = sys.argv[1] if len(sys.argv) > 1 else ""
+        chosen = [test for test in TESTS
+                  if not wanted or wanted in test.__name__ or test is TESTS[0]]
 
-        for test in TESTS:
+        for test in chosen:
             try:
                 detail = test(ctx)
                 print("  OK   %-52s %s" % (test.__name__, detail or ""))
@@ -884,7 +1379,7 @@ def main():
         shutil.rmtree(TMP, ignore_errors=True)
 
     print("\n%d/%d tests passes%s"
-          % (len(TESTS) - failures - skipped, len(TESTS),
+          % (len(chosen) - failures - skipped, len(chosen),
              (" (%d ignores)" % skipped) if skipped else ""))
     return 1 if failures else 0
 

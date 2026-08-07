@@ -68,6 +68,7 @@
   var mediaUrl = null;
   var mediaIsObjectUrl = false;   /* une URL objet se revoque, pas une URL serveur */
   var playbackListener = null;
+  var stopWatchingOut = null;     /* désarme le guet de fin de plage du REC */
   var exportDirectory = '';
 
   /* Ajustement du média dans le cadre. `contain` fait entrer le média entier
@@ -1029,10 +1030,17 @@
     if (started && started.catch) started.catch(function () { fire(0); });
   }
 
-  /** Positionne le rush sur son point IN sans le lancer. */
+  /** Positionne le rush sur son point IN sans le lancer.
+   *
+   *  Au *milieu* de la première image de la plage, jamais sur sa frontière : un
+   *  décodeur peut retomber d'un côté comme de l'autre d'un instant qui sépare
+   *  deux images, et la prise commençait alors une image trop tôt. */
   function seekToInPoint() {
     if (!mediaNode || mediaType === 'image') return;
-    try { mediaNode.currentTime = inPoint(); } catch (e) { /* pas encore seekable */ }
+    try {
+      mediaNode.currentTime = MediaTransport.isTimed()
+        ? MediaTransport.firstFrameTime() : inPoint();
+    } catch (e) { /* pas encore seekable */ }
   }
 
   function desktopShortcutsEnabled() {
@@ -1764,6 +1772,8 @@
                                          outPoint: kept ? kept.out : undefined });
       onMediaReady();
     }
+    // La cadence du projet vient de changer : l'écart avec celle du rush aussi.
+    syncCadenceWarning();
   }
 
   /** Bornes actuellement posées, ou `null` quand il n'y en a pas de sensées —
@@ -1847,6 +1857,7 @@
     mediaSize = { width: 0, height: 0 };
     setMediaLoading(false);
     setMediaSourceBadge(null);
+    syncCadenceWarning();
     $('tp-fit').style.display = 'none';
     $('tp-page').style.display = 'none';
     $('tp-clear').style.display = 'none';
@@ -1992,6 +2003,54 @@
     // deux côtés à la fois.
     applyAudioRole();
     status('Média « ' + name + ' » chargé.');
+    syncCadenceWarning();
+  }
+
+  /** « 24 », « 25 », mais « 23.98 » : une cadence entière se lit entière. */
+  function formatFps(value) {
+    return Math.abs(value - Math.round(value)) < 0.005
+      ? String(Math.round(value)) : value.toFixed(2);
+  }
+
+  /* Cadence du rush contre cadence du projet.
+   *
+   * Les bornes IN/OUT se calent sur la grille d'images du **projet** : c'est
+   * elle qui donne un sens à « une image », ici comme au rendu. Un rush qui n'a
+   * pas cette cadence n'a aucune image aux instants où tombent les bornes — un
+   * point OUT posé sur la dernière image d'un plan tombe au milieu d'une image
+   * du rush. Celle qui se fige n'est alors pas tout à fait celle qu'on a
+   * désignée, et l'écart se déplace d'une borne à l'autre : un rush 24 dans un
+   * projet 25 dérive d'une image toutes les vingt-cinq.
+   *
+   * Rien n'est réparable en aval : c'est le projet qui n'est pas à la cadence
+   * de son rush, et cela se décide au moment de le créer. Le seul service à
+   * rendre est de le dire, et de le dire là où l'on regarde le rush. */
+  function syncCadenceWarning() {
+    var node = $('tp-cadence');
+    if (!node) return;
+    // Une image n'a pas de cadence, un son non plus, et un fichier ouvert
+    // depuis le navigateur n'est pas passé par le serveur : sans mesure, on se
+    // tait plutôt que d'inventer un écart.
+    var rush = currentMedia && currentMedia.kind === 'video'
+      ? Number(currentMedia.fps) || 0 : 0;
+    // Le seuil laisse passer les cadences NTSC annoncées à la fraction près
+    // (30000/1001 contre 30) et retient 24 contre 25.
+    var apart = rush > 0 && Math.abs(rush - config.fps) > 0.05;
+    node.style.display = apart ? '' : 'none';
+    if (!apart) return;
+
+    var said = 'Rush à ' + formatFps(rush) + ' i/s, projet à '
+      + formatFps(config.fps) + ' i/s';
+    node.textContent = '⚠ ' + said;
+    node.title = said + '.\n\nLes points IN et OUT se calent sur les images du '
+      + 'projet : à cette cadence-là, ils ne tombent pas sur des images du '
+      + 'rush. L’image figée en fin de plage peut être décalée d’une image, et '
+      + 'l’écart se déplace le long du rush.\n\nLa cadence du projet se choisit '
+      + 'à sa création : pour annoter ce rush image par image, repartez d’un '
+      + 'projet à ' + formatFps(rush) + ' i/s.';
+    status(said + ' — les bornes IN/OUT ne tomberont pas sur des images du '
+      + 'rush. Pour annoter image par image, repartez d’un projet à '
+      + formatFps(rush) + ' i/s.');
   }
 
   /** Le navigateur vient de refuser un rush qu'on lui servait tel quel : c'est
@@ -2602,36 +2661,51 @@
    * Le même passage recale l'horloge du tracé sur celle du rush — c'est le
    * seul endroit où l'on tient les deux en main en même temps. */
   function watchRecordedRange() {
-    var stopAt = outPoint();
-    // Une demi-image de marge : la tête de lecture tombe rarement pile sur la
-    // frontière, et attendre l'égalité stricte laisserait passer une image. Un
-    // média dont personne ne sait dire la durée n'a pas de borne à surveiller —
-    // le recalage de l'horloge, lui, reste utile.
-    var limit = isFinite(stopAt) ? stopAt - MediaTransport.frameStep() / 2 : Infinity;
+    // Un média dont personne ne sait dire la durée n'a pas de borne à
+    // surveiller — le recalage de l'horloge, lui, reste utile.
+    var bounded = isFinite(outPoint());
+
+    function reached() {
+      return bounded && MediaTransport.reachedOut(mediaNode.currentTime || 0);
+    }
 
     function check() {
       if (!recording || !mediaNode || mediaType === 'image') return;
-      var at = mediaNode.currentTime || 0;
-      syncClockToMedia(at);
-      if (at >= limit) { stopRecording(); return; }
+      syncClockToMedia(mediaNode.currentTime || 0);
+      if (reached()) { stopRecording(); return; }
       requestAnimationFrame(check);
     }
 
+    // Le guet décisif : l'image présentée, pas l'heure qu'il est. Voir
+    // `watchOut` dans transport.js — c'est ce qui empêche l'image d'après le
+    // point OUT de passer à l'écran avant qu'on ait pu arrêter le lecteur.
+    stopWatchingOut = bounded ? MediaTransport.watchOut(stopRecording) : null;
+
     playbackListener = function () {
-      if (recording && mediaNode && (mediaNode.currentTime || 0) >= limit) stopRecording();
+      if (recording && mediaNode && reached()) stopRecording();
     };
     mediaNode.addEventListener('timeupdate', playbackListener);
     requestAnimationFrame(check);
   }
 
   /** Portion de rush réellement parcourue, en millisecondes, ou `null` quand
-   *  le média n'a pas d'horloge (une image de fond). */
+   *  le média n'a pas d'horloge (une image de fond).
+   *
+   *  Elle se compte en **images entières** : de celle du point IN à celle qui
+   *  est à l'écran, incluse. Mesurer l'écart brut entre deux instants rendait
+   *  ce compte dépendant de l'endroit exact où le lecteur s'était arrêté —
+   *  arrêté sur le *début* de la dernière image, il en manquait une, et la
+   *  couche « média » de l'export était une image plus courte que la plage
+   *  annotée. */
   function mediaSpanElapsed() {
     if (!mediaNode || mediaType === 'image' || !MediaTransport.isTimed()) return null;
     var start = inPoint();
     var end = outPoint();
-    var at = clamp(mediaNode.currentTime || 0, start, isFinite(end) ? end : Infinity);
-    return (at - start) * 1000;
+    var step = MediaTransport.frameStep();
+    var at = clamp(mediaNode.currentTime || 0, start,
+                   isFinite(end) ? end - step / 2 : Infinity);
+    var shown = MediaTransport.frameOf(at) - MediaTransport.frameOf(start) + 1;
+    return Math.max(1, shown) * step * 1000;
   }
 
   /* Les boutons de la barre portent une icône SVG et une légende : écraser
@@ -2654,6 +2728,17 @@
   function stopRecording() {
     if (!recording) return;
     recording = false;
+    // Arrêter le lecteur d'abord, avant tout calcul et avant tout message :
+    // chaque instruction qui passe avant est du temps pendant lequel le
+    // compositeur peut présenter l'image suivante — celle qu'on ne veut
+    // justement jamais montrer.
+    if (mediaNode && playbackListener) mediaNode.pause();
+    if (stopWatchingOut) { stopWatchingOut(); stopWatchingOut = null; }
+    if (mediaNode && playbackListener) {
+      mediaNode.removeEventListener('timeupdate', playbackListener);
+      playbackListener = null;
+    }
+
     // La durée enregistrée est celle de la portion de rush parcourue : c'est
     // elle qui donne le nombre d'images à l'export. L'horloge du système
     // servait de mesure et pouvait avoir dérivé de quelques millisecondes sur
@@ -2662,11 +2747,6 @@
     recordedDuration = span === null ? performance.now() - recordStart : span;
     emit({ t: 'rec.stop', duration: recordedDuration });
 
-    if (mediaNode && playbackListener) {
-      mediaNode.pause();
-      mediaNode.removeEventListener('timeupdate', playbackListener);
-      playbackListener = null;
-    }
     if (MediaTransport.isTimed()) {
       MediaTransport.setLocked(false);
       MediaTransport.parkAtOut();
@@ -3923,10 +4003,27 @@
     status('Enregistrement en cours sur la tablette…');
   }
 
+  /* La fin d'enregistrement ne termine pas les tracés en cours.
+   *
+   * Le rush s'arrête sur son point OUT, mais la main, elle, ne s'arrête pas :
+   * le geste continue sur l'image figée, et c'est même à cela que sert le gel —
+   * annoter la dernière image d'un plan demande plus de temps qu'elle n'en
+   * dure. Ces points-là continuent d'arriver, sous l'identifiant du tracé
+   * commencé avant le point OUT.
+   *
+   * Sceller ici les tracés en cours jetait leur calque : les points suivants
+   * n'avaient plus de destination et étaient ignorés un à un. Sur la tablette
+   * le trait restait continu ; à l'arrivée il était coupé net, à l'instant
+   * précis de la fin de lecture. Un tracé commencé *après*, lui, passait
+   * entier — il ouvrait son propre calque. C'est ce qui rendait la panne
+   * déroutante : le REC n'était pas coupé, un seul trait l'était.
+   *
+   * Un tracé se termine par son `stroke.end`, et par rien d'autre. Le scellage
+   * reste ce qu'il doit être : le rattrapage d'une tablette qui s'en va
+   * (déconnexion, reprise de main) et ne dira jamais qu'elle a fini. */
   function remoteRecStop(message) {
     recording = false;
-    recordedDuration = message.duration || recordedDuration;
-    sealIncoming();
+    recordedDuration = Math.max(recordedDuration, message.duration || 0);
     if (MediaTransport.isTimed()) {
       MediaTransport.setLocked(false);
       MediaTransport.parkAtOut();

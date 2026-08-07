@@ -883,6 +883,20 @@
             padding: 0 2px;
         }
         .tp-close:hover:not(:disabled) { color: var(--rec); }
+        /* Le seul avertissement du lecteur. Il ne colore rien : la charte
+           reserve la couleur au REC et a l'export. C'est le cadre qui le
+           distingue du reste de l'en-tete, qui est en gris pale. */
+        .tp-warn {
+            flex-shrink: 1;
+            min-width: 0;
+            padding: 2px 7px;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            color: var(--text);
+            font-size: 10px;
+            line-height: 1.35;
+            cursor: help;
+        }
         .tp-head .caret { font-size: 8px; display: inline-block; transition: transform .15s; }
         #transport.collapsed .tp-head .caret { transform: rotate(-90deg); }
         .tp-row {
@@ -2062,6 +2076,10 @@
                     <button id="tp-fit" style="display:none;">Cadrage…</button>
                     <button id="tp-page" style="display:none;">Page…</button>
                     <input type="file" id="media-input" accept="video/*, audio/*, image/*" style="display:none;">
+                    <!-- Cadence du rush differente de celle du projet : les bornes
+                         IN/OUT se calent sur la grille d'images du projet, et il
+                         n'y a pas d'image du rush a ces instants-la. -->
+                    <span id="tp-cadence" class="tp-warn" style="display:none;"></span>
                     <span class="tp-spacer"></span>
                     <span id="tp-name" class="tc dim"></span>
                     <!-- Rendre le fond : on retombe sur la couleur du canevas. -->

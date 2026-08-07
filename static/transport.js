@@ -30,10 +30,16 @@
     return text;
   }
 
-  /** Secondes -> HH:MM:SS:FF (non drop-frame). */
+  /** Secondes -> HH:MM:SS:FF (non drop-frame).
+   *
+   *  Le timecode d'un instant est celui de l'image qui est *a l'ecran* a cet
+   *  instant, donc celle dont l'intervalle le contient : une division entiere.
+   *  L'arrondi a l'image la plus proche, lui, changeait de reponse au milieu
+   *  d'une image -- l'ecran montrait la 19 et le compteur annoncait la 20.
+   *  C'est cette contradiction que l'on prenait pour une borne « instable ». */
   function toTimecode(seconds) {
     if (!isFinite(seconds) || seconds < 0) seconds = 0;
-    var totalFrames = Math.round(seconds * fps);
+    var totalFrames = frameOf(seconds);
     var frames = totalFrames % fps;
     var totalSeconds = Math.floor(totalFrames / fps);
     return pad(Math.floor(totalSeconds / 3600)) + ':'
@@ -71,6 +77,23 @@
   /** Une image, exprimee en secondes : le pas minimal de tout le lecteur. */
   function frameStep() { return 1 / fps; }
 
+  /* Marge de calcul, tres en dessous d'une image et tres au-dessus du bruit du
+   * calcul flottant : 29/25*25 vaut 28.999999999999996, et sans elle la 29e
+   * image se lirait comme la 28e. */
+  var EPS = 1e-6;
+
+  /** Numero de l'image qui occupe cet instant. L'image `n` va de `n/fps`
+   *  (inclus) a `(n+1)/fps` (exclu) : une division entiere, jamais un arrondi. */
+  function frameOf(seconds) {
+    return Math.floor(Math.max(0, seconds) * fps + EPS);
+  }
+
+  /** Debut de l'image qui occupe cet instant. */
+  function frameStart(seconds) { return frameOf(seconds) / fps; }
+
+  /** Fin de l'image qui occupe cet instant, c.-a-d. debut de la suivante. */
+  function frameEnd(seconds) { return (frameOf(seconds) + 1) / fps; }
+
   /* Cale un temps sur la grille d'images.
    *
    * Une borne designe une image, pas un instant quelconque entre deux. Posee a
@@ -82,14 +105,39 @@
     return Math.round(seconds * fps) / fps;
   }
 
+  /* Numero de la derniere image de la plage.
+   *
+   * `outPoint` est la *fin* de la plage : l'instant ou commence la premiere
+   * image qui n'en fait plus partie. C'est ce dont le moteur de rendu a besoin
+   * (`-to`), et c'est la duree de la plage qui s'en deduit sans correction.
+   *
+   * Ce que l'utilisateur.ice designe, en revanche, est une image : au montage,
+   * le point de sortie se pose sur la *derniere image du plan*, pas sur la
+   * premiere du plan suivant. Les deux se traduisent l'un dans l'autre ici, et
+   * nulle part ailleurs -- `outFrame()` pour l'afficher et le poser,
+   * `outPoint` pour tout le reste. */
+  function outFrame() {
+    return Math.max(frameOf(inPoint), Math.ceil(outPoint * fps - EPS) - 1);
+  }
+
   /* Derniere position de lecture encore dans la plage.
    *
-   * Le *milieu* de la derniere image, et non son debut : aucun arrondi ne peut
-   * alors la faire deborder sur la suivante, qui est hors plage. C'est la que
-   * le lecteur se gare quand il atteint le point OUT, pour que l'image laissee
-   * a l'ecran soit la derniere de ce qui a ete annote. */
+   * Le *milieu* de la derniere image, et non l'une de ses bornes : aucun
+   * arrondi, ni cote navigateur ni ici, ne peut alors la faire basculer sur sa
+   * voisine. C'est la que le lecteur se gare quand il atteint le point OUT,
+   * pour que l'image laissee a l'ecran soit la derniere de ce qui a ete
+   * annote. */
   function lastFrameTime() {
-    return Math.max(inPoint, outPoint - frameStep() / 2);
+    return (outFrame() + 0.5) / fps;
+  }
+
+  /* La derniere image de la plage est-elle deja a l'ecran ?
+   *
+   * `at` est l'instant de l'image *presentee* quand on le sait
+   * (`requestVideoFrameCallback`), l'horloge du lecteur a defaut. La nuance
+   * decide de tout : voir plus bas `watchOut`. */
+  function reachedOut(at) {
+    return frameOf(at) >= outFrame();
   }
 
   /* -------------------------------------------------------------- Rendu */
@@ -114,21 +162,92 @@
     $('tp-play').textContent = node.paused ? '▶' : '❚❚';
 
     if (document.activeElement !== $('tp-in-tc')) $('tp-in-tc').value = toTimecode(inPoint);
-    if (document.activeElement !== $('tp-out-tc')) $('tp-out-tc').value = toTimecode(outPoint);
+    // Le champ redit l'image designee, pas la fin de la plage : ce que l'on
+    // tape et ce que l'on relit doivent etre le meme timecode.
+    if (document.activeElement !== $('tp-out-tc')) {
+      $('tp-out-tc').value = toTimecode(outFrame() / fps);
+    }
   }
 
   function tick() {
     if (!node) return;
-    // Hors enregistrement, la lecture reste bornee par les points IN/OUT. On
-    // s'arrete des que la derniere image de la plage a ete montree -- une demi
-    // image avant OUT, la ou elle est encore a l'ecran -- et l'on se gare sur
-    // elle. Se garer sur OUT lui-meme figeait la premiere image *hors* plage.
-    if (!locked && !node.paused && node.currentTime >= outPoint - frameStep() / 2) {
-      node.pause();
-      seek(lastFrameTime());
-    }
+    // Hors enregistrement, la lecture reste bornee par les points IN/OUT. Le
+    // guet a l'image presentee (`watchOut`) fait l'essentiel ; celui-ci reste
+    // en second filet pour les medias qui n'ont pas d'image a presenter -- un
+    // son -- et pour un lecteur dont le rappel d'image ne partirait pas.
+    if (!locked && !node.paused && reachedOut(node.currentTime || 0)) haltAtOut();
     paint();
     raf = requestAnimationFrame(tick);
+  }
+
+  /* Arret sur la derniere image de la plage, sans jamais montrer la suivante.
+   *
+   * L'horloge du lecteur retarde sur ce que le compositeur affiche : elle est
+   * mise a jour a son propre rythme, et un decodeur qui rattrape un a-coup de
+   * reseau -- le quotidien d'une tablette -- presente plusieurs images avant
+   * que `currentTime` ne l'admette. Guetter la fin de plage a cette horloge-la,
+   * c'est s'arreter apres coup : l'image d'apres le point OUT passait a
+   * l'ecran, une image durant, avant le retour en arriere. C'etait l'image
+   * fantome, et aucune marge prise sur l'horloge ne pouvait la supprimer --
+   * elle mesurait la mauvaise chose.
+   *
+   * `requestVideoFrameCallback` dit *quelle* image vient d'etre presentee, au
+   * moment ou elle l'est. Des que c'est celle du point OUT, il reste une duree
+   * d'image entiere pour arreter le lecteur : la suivante n'est jamais
+   * composee. C'est le seul signal en avance sur elle. */
+  function watchOut(onReached) {
+    if (!node || kind === 'image'
+      || typeof node.requestVideoFrameCallback !== 'function') {
+      return function () { };
+    }
+    var watched = node;
+    var stopped = false;
+    var handle = null;
+
+    function presented(now, metadata) {
+      if (stopped || watched !== node) return;
+      var at = metadata && typeof metadata.mediaTime === 'number'
+        ? metadata.mediaTime : (watched.currentTime || 0);
+      if (reachedOut(at)) { stopped = true; onReached(); return; }
+      handle = watched.requestVideoFrameCallback(presented);
+    }
+
+    handle = watched.requestVideoFrameCallback(presented);
+    return function () {
+      stopped = true;
+      if (handle !== null && watched.cancelVideoFrameCallback) {
+        try { watched.cancelVideoFrameCallback(handle); } catch (error) { /* deja parti */ }
+      }
+    };
+  }
+
+  /** Fin de plage atteinte hors enregistrement : on s'arrete et on se gare. */
+  function haltAtOut() {
+    if (!node || node.paused) return;
+    node.pause();
+    parkAtOut();
+  }
+
+  /* Ramene la tete de lecture sur la derniere image de la plage.
+   *
+   * Sans rien faire quand elle y est deja : un `seek` redecode, et cette
+   * secousse-la se voit autant que celle qu'on voulait corriger. */
+  function parkAtOut() {
+    if (!node || kind === 'image') return;
+    if (frameOf(node.currentTime || 0) === outFrame()) { paint(); return; }
+    seek(lastFrameTime());
+  }
+
+  var disarm = null;
+
+  function armOutWatch() {
+    disarmOutWatch();
+    if (locked) return;   // pendant le REC, c'est l'enregistrement qui borne
+    disarm = watchOut(haltAtOut);
+  }
+
+  function disarmOutWatch() {
+    if (disarm) { disarm(); disarm = null; }
   }
 
   function startLoop() {
@@ -148,10 +267,16 @@
     paint();
   }
 
+  /** Se poser sur une image donnee, en son milieu -- voir `lastFrameTime`. */
+  function seekFrame(index) {
+    seek((Math.max(0, index) + 0.5) / fps);
+  }
+
   function togglePlay() {
     if (!node || locked) return;
     if (node.paused) {
-      if (node.currentTime < inPoint || node.currentTime >= outPoint - frameStep()) seek(inPoint);
+      var at = frameOf(node.currentTime || 0);
+      if (at < frameOf(inPoint) || at >= outFrame()) seekFrame(frameOf(inPoint));
       node.play().catch(function () { /* lecture refusee : sans conséquence ici */ });
     } else {
       node.pause();
@@ -168,10 +293,17 @@
   function stepFrame(direction) {
     if (!node || locked) return;
     if (!node.paused) node.pause();
-    seek((Math.round(node.currentTime * fps) + direction) / fps);
+    seekFrame(frameOf(node.currentTime || 0) + direction);
   }
 
-  /* Rendre la main sans rien changer quand rien ne change : c'est ce qui
+  /* Pose la plage, en coordonnees de plage : `newIn` est son debut, `newOut`
+   * sa fin -- l'instant ou commence la premiere image qui n'en fait plus
+   * partie. C'est le contrat que se partagent les deux ecrans, la session et le
+   * moteur de rendu ; la traduction depuis l'image designee se fait une seule
+   * fois, dans `setInAt` / `setOutAt`. Le rappeler avec ce qu'il vient de
+   * rendre ne doit rien deplacer.
+   *
+   * Rendre la main sans rien changer quand rien ne change : c'est ce qui
    * empêche la synchronisation des bornes entre les deux écrans de reboucler
    * (l'un applique ce qu'il reçoit, ce qui le ferait réémettre, etc.). */
   function setRange(newIn, newOut) {
@@ -246,10 +378,20 @@
     if (!dragging) return;
     event.preventDefault();
     var time = positionToTime(event.clientX);
-    if (dragging === 'in') setRange(time, outPoint);
-    else if (dragging === 'out') setRange(inPoint, time);
+    if (dragging === 'in') setInAt(time);
+    else if (dragging === 'out') setOutAt(time);
     else seek(time);
   }
+
+  /* Les deux seuls chemins par lesquels une personne designe une image.
+   *
+   * Le point IN est l'image ou l'on entre : sa borne est son debut. Le point
+   * OUT est la derniere image gardee : la plage court donc jusqu'a sa *fin*.
+   * Poser la borne sur le debut de l'image designee revenait a l'exclure --
+   * c'est l'image de trop, ou de moins, qu'on se disputait de bout en bout de
+   * la chaine. */
+  function setInAt(seconds) { setRange(frameStart(seconds), outPoint); }
+  function setOutAt(seconds) { setRange(inPoint, frameEnd(seconds)); }
 
   function onTrackPointerUp(event) {
     if (!dragging) return;
@@ -274,17 +416,17 @@
     $('tp-track').addEventListener('pointercancel', onTrackPointerUp);
 
     $('tp-in-set').addEventListener('click', function () {
-      if (node && !locked) setRange(node.currentTime, outPoint);
+      if (node && !locked) setInAt(node.currentTime);
     });
     $('tp-out-set').addEventListener('click', function () {
-      if (node && !locked) setRange(inPoint, node.currentTime);
+      if (node && !locked) setOutAt(node.currentTime);
     });
     $('tp-reset').addEventListener('click', function () {
       if (node && !locked) setRange(0, duration);
     });
 
-    commitOnEnter($('tp-in-tc'), function (seconds) { setRange(seconds, outPoint); });
-    commitOnEnter($('tp-out-tc'), function (seconds) { setRange(inPoint, seconds); });
+    commitOnEnter($('tp-in-tc'), setInAt);
+    commitOnEnter($('tp-out-tc'), setOutAt);
 
     $('tp-toggle').addEventListener('click', function () {
       $('transport').classList.toggle('collapsed');
@@ -366,8 +508,8 @@
           duration = isFinite(node.duration) ? node.duration : 0;
           settleRange();
         });
-        node.addEventListener('play', paint);
-        node.addEventListener('pause', paint);
+        node.addEventListener('play', function () { armOutWatch(); paint(); });
+        node.addEventListener('pause', function () { disarmOutWatch(); paint(); });
         node.addEventListener('seeked', paint);
       }
 
@@ -384,6 +526,7 @@
      *  avec l'element, qui est jete. */
     detach: function () {
       stopLoop();
+      disarmOutWatch();
       node = null;
       wired = null;
       kind = null;
@@ -398,6 +541,9 @@
     },
 
     inPoint: function () { return inPoint; },
+    /** Fin de la plage : l'instant ou commence la premiere image qui n'en fait
+     *  plus partie. La duree de la plage en decoule sans correction, et c'est
+     *  ce que `-to` attend du cote du moteur de rendu. */
     outPoint: function () { return outPoint > inPoint ? outPoint : (duration || Infinity); },
 
     /** Pose les bornes depuis l'extérieur — l'autre écran, ou la session
@@ -410,20 +556,36 @@
     /** Une image, en secondes, a la cadence du transport. */
     frameStep: frameStep,
 
+    /** Numero de l'image qui occupe cet instant, et celui des deux bornes. */
+    frameOf: frameOf,
+    outFrame: outFrame,
+
+    /** Milieu de la premiere image de la plage : c'est de la que part une
+     *  lecture, plutot que de la frontiere exacte ou le decodeur peut retomber
+     *  d'un cote comme de l'autre. */
+    firstFrameTime: function () { return (frameOf(inPoint) + 0.5) / fps; },
+
+    /** L'image du point OUT est-elle atteinte ? `at` est l'instant de l'image
+     *  presentee quand on le connait, l'horloge du lecteur a defaut. */
+    reachedOut: reachedOut,
+
+    /** Previent des que l'image du point OUT est presentee, et rend de quoi
+     *  desarmer. Voir le commentaire de `watchOut` : c'est le seul signal qui
+     *  arrive avant l'image suivante. */
+    watchOut: watchOut,
+
     /** Ramene la tete de lecture sur la derniere image de la plage.
      *
      *  Un enregistrement laisse le rush la ou le decodeur l'a mene, souvent
      *  une ou deux images au-dela du point OUT -- davantage sur une tablette,
      *  qui recoit son rush par le reseau. L'image figee a l'ecran n'etait alors
      *  plus celle qu'on venait d'annoter. */
-    parkAtOut: function () {
-      if (!node || kind === 'image') return;
-      seek(lastFrameTime());
-    },
+    parkAtOut: parkAtOut,
 
     /** Pendant le REC, l'utilisateur ne doit plus pouvoir toucher au transport. */
     setLocked: function (value) {
       locked = !!value;
+      if (locked) disarmOutWatch();
       $('transport').classList.toggle('locked', locked);
       ['tp-play', 'tp-back', 'tp-fwd', 'tp-frame-back', 'tp-frame-fwd', 'tp-choose',
        'tp-clear', 'tp-in-set', 'tp-out-set', 'tp-reset', 'tp-in-tc', 'tp-out-tc']

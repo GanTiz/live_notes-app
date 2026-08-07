@@ -67,8 +67,21 @@ cette prévisualisation.
 - **Points IN/OUT** : posés à la poignée sur la barre de progression ou en
   timecode, pour ne rejouer qu'une portion du média pendant le REC. Une borne
   désigne toujours une image entière : elle se cale sur la grille du média, et
-  vaut la même des deux côtés — poste, tablette et export. En fin de plage, la
-  lecture s'arrête sur la dernière image annotée, jamais sur la suivante.
+  vaut la même des deux côtés — poste, tablette et export.
+  - Comme au montage, le point OUT désigne la **dernière image gardée**, pas la
+    première image écartée : posé sur la dernière image d'un plan, il ne montre
+    jamais la première du plan suivant. Le timecode affiché est toujours celui
+    de l'image qui est à l'écran.
+  - En fin de plage, la lecture s'arrête sur cette image et l'y laisse figée.
+    Le tracé, lui, continue : ce qui est dessiné sur l'image figée est
+    enregistré et exporté comme le reste (voir « la couche média dure aussi
+    longtemps que le rush était affiché »).
+- **Cadence du rush** : si le rush n'est pas à la cadence du projet — un rush
+  24 i/s dans un projet 25 i/s, par exemple — l'en-tête du lecteur le signale.
+  Les bornes se calent sur les images du **projet** ; à une autre cadence, elles
+  ne tombent pas sur des images du rush, et l'image figée en fin de plage peut
+  être décalée d'une image. La cadence du projet se choisit à sa création :
+  pour annoter un rush image par image, repartez d'un projet à sa cadence.
 - **Effacer pendant le REC** repart d'une toile vierge sans perdre
   l'enregistrement en cours : l'effacement devient un évènement de la
   timeline, rejoué à l'export comme le reste.
