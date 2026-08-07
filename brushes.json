@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "_comment": "Source de verite unique pour les pinceaux. Lu par le moteur Python (brush_engine.py) et servi au front-end via GET /api/brushes. Les presets utilisateur sont stockes separement dans user_presets.json.",
+  "defaults": {
+    "shape": "round",
+    "color": "#111111",
+    "size": 16,
+    "opacity": 1.0,
+    "flow": 1.0,
+    "hardness": 0.9,
+    "spacing": 0.06,
+    "aspect": 1.0,
+    "angle": 0.0,
+    "follow": 0.0,
+    "eraser": false,
+    "texture": null,
+    "jitter": {
+      "position": 0.0,
+      "size": 0.0,
+      "angle": 0.0,
+      "opacity": 0.0
+    },
+    "pressure": {
+      "size": 0.0,
+      "opacity": 0.0
+    }
+  },
+  "presets": [
+    {
+      "id": "felt",
+      "name": "Feutre",
+      "shape": "round",
+      "color": "#111111",
+      "size": 14,
+      "opacity": 1.0,
+      "flow": 1.0,
+      "hardness": 0.92,
+      "spacing": 0.05,
+      "pressure": { "size": 0.35, "opacity": 0.0 }
+    },
+    {
+      "id": "highlighter",
+      "name": "Surligneur",
+      "shape": "rect",
+      "color": "#ffe14d",
+      "size": 44,
+      "opacity": 0.38,
+      "flow": 1.0,
+      "hardness": 0.96,
+      "spacing": 0.03,
+      "aspect": 0.3,
+      "angle": -38,
+      "follow": 0.0
+    },
+    {
+      "id": "textured",
+      "name": "Pinceau texture",
+      "shape": "speckle",
+      "color": "#1f4fd8",
+      "size": 34,
+      "opacity": 0.95,
+      "flow": 0.5,
+      "hardness": 0.55,
+      "spacing": 0.13,
+      "jitter": { "position": 0.16, "size": 0.35, "angle": 180, "opacity": 0.35 },
+      "pressure": { "size": 0.5, "opacity": 0.3 }
+    },
+    {
+      "id": "pencil",
+      "name": "Crayon a papier",
+      "shape": "grain",
+      "color": "#3a3a3a",
+      "size": 7,
+      "opacity": 0.9,
+      "flow": 0.6,
+      "hardness": 0.8,
+      "spacing": 0.06,
+      "jitter": { "position": 0.22, "size": 0.2, "angle": 180, "opacity": 0.3 },
+      "pressure": { "size": 0.3, "opacity": 0.45 }
+    },
+    {
+      "id": "eraser",
+      "name": "Gomme",
+      "shape": "round",
+      "eraser": true,
+      "size": 36,
+      "opacity": 1.0,
+      "flow": 1.0,
+      "hardness": 0.75,
+      "spacing": 0.04
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+Flask>=3.0
+# WebSocket sur le serveur Flask lui-meme (mode tablette, voir session.py).
+# Pur Python, compatible avec le serveur threade de Werkzeug et avec
+# PyInstaller : pas d'eventlet ni de gevent a embarquer.
+flask-sock>=0.7
+numpy>=1.24
+Pillow>=10.0
+# QR code d'appairage de la tablette. Pur Python, rendu en SVG maison.
+qrcode>=7.4
+# Rasterisation des pages de PDF (voir pdfdoc.py). PDFium -- le moteur PDF de
+# Chrome -- est embarque dans la roue : rien a installer sur la machine,
+# contrairement a poppler qu'exigerait pdf2image. Et surtout, licence
+# Apache-2.0/BSD-3-Clause la ou PyMuPDF est en AGPL : la bibliotheque est liee
+# au process, elle contaminerait donc l'application distribuee.
+pypdfium2>=4

@@ -1,0 +1,2230 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <!-- `viewport-fit=cover` : sous une encoche ou une barre d'accueil, le
+         canevas va jusqu'au bord au lieu de laisser deux bandes. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+    <!-- Ajoutée à l'écran d'accueil, la page s'ouvre sans barre d'adresse ni
+         onglets — le seul moyen d'y arriver durablement sur iPad. Le bouton
+         plein écran de l'interface tablette couvre le cas d'un simple onglet. -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="live_notes">
+    <title>live_notes — Enregistreur de tracé</title>
+    <style>
+        /* Styles 100% offline - Pas de framework externe.
+         *
+         * Charte : niveaux de gris uniquement. La couleur est réservée aux deux
+         * actions critiques — rouge = enregistrement, vert = export.
+         *
+         * Le fond de travail est un gris neutre à 50 % (#808080) : c'est la
+         * référence sur laquelle on juge un tracé. Le reste de l'habillage
+         * gravite autour, avec du texte sombre — un quasi-noir fatiguerait
+         * l'oeil et fausserait la lecture des valeurs dessinées. */
+        :root {
+            --workspace:     #808080;   /* gris neutre 50 % — la référence */
+            /* L'habillage se tient un cran en dessous : le plan de travail doit
+             * rester la surface la plus claire, c'est sur lui qu'on juge. */
+            --bg:            #656565;
+            --surface:       #717171;
+            --surface-2:     #858585;
+            --surface-3:     #979797;
+            --field:         #a2a2a2;
+            --sunken:        #626262;
+            --border:        #565656;
+            --border-strong: #404040;
+            --text:          #131313;
+            --text-dim:      #2f2f2f;
+            --text-faint:    #474747;
+            --rec:           #b6332b;
+            --rec-hover:     #c93a31;
+            --export:        #1e7346;
+            --export-hover:  #248451;
+            --radius:        6px;
+            /* Police neutre, présente partout, sans caractère propre. */
+            --ui-font: Arial, "Helvetica Neue", Helvetica, "Liberation Sans", sans-serif;
+            --tc-font: "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: var(--ui-font);
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            font-size: 13px;
+        }
+
+        ::selection { background: var(--surface-3); }
+
+        /* ------------------------------------------------------- Boutons */
+        button {
+            cursor: pointer;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 7px 14px;
+            font-weight: 600;
+            font-size: 12px;
+            font-family: inherit;
+            background: var(--surface-2);
+            color: var(--text);
+            transition: background-color .12s, border-color .12s, color .12s;
+        }
+        button:hover:not(:disabled) { background: var(--surface-3); border-color: #5d5d5d; }
+        button:active:not(:disabled) { background: #1b1b1b; }
+        button:disabled { opacity: .4; cursor: not-allowed; }
+        button:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 1px; }
+
+        /* Neutre appuyé : action principale non critique (créer l'espace…) */
+        .btn-strong { background: #232323; color: #f0f0f0; border-color: #232323; }
+        .btn-strong:hover:not(:disabled) { background: #333; border-color: #333; }
+
+        .btn-quiet { background: transparent; border-color: var(--border); color: var(--text-dim); }
+        .btn-quiet:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+
+        /* Suppression : rouge, mais en retrait — ce n'est pas le bouton REC. */
+        .btn-danger { background: #f5f5f5; border-color: var(--rec); color: var(--rec); }
+        .btn-danger:hover:not(:disabled) { background: var(--rec); border-color: var(--rec); color: #fff; }
+
+        /* Les deux seules touches de couleur de l'interface. */
+        .btn-rec { background: var(--rec); border-color: var(--rec); color: #fff; }
+        .btn-rec:hover:not(:disabled) { background: var(--rec-hover); border-color: var(--rec-hover); }
+        .btn-export { background: var(--export); border-color: var(--export); color: #fff; }
+        .btn-export:hover:not(:disabled) { background: var(--export-hover); border-color: var(--export-hover); }
+
+        /* Boutons d'action de la barre : une icône, une légende courte dessous.
+         *
+         * Les libellés en toutes lettres (« ● ARMER / REC », « ▶ Prévisualiser »,
+         * « Tablette… ») occupaient une largeur telle que la barre débordait sur
+         * un écran de 1440 px et repassait à la ligne, mangeant la hauteur du
+         * plan de travail. L'icône porte le sens, la légende lève l'ambiguïté,
+         * et `title`/`aria-label` disent la phrase entière. */
+        .btn-tool {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 2px;
+            min-width: 58px;
+            padding: 4px 8px 3px;
+            line-height: 1;
+        }
+        .btn-tool svg {
+            width: 19px; height: 19px;
+            /* Le trait suit la couleur du bouton : un même jeu d'icônes sert
+             * sur fond clair, sur le rouge du REC et sur le vert de l'export. */
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.6;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .btn-tool svg .filled { fill: currentColor; stroke: none; }
+        .btn-tool svg .mark { stroke-width: 1.9; }
+        .btn-tool > span {
+            font-size: 9px;
+            font-weight: 600;
+            letter-spacing: .05em;
+            text-transform: uppercase;
+        }
+        /* Les légendes tiennent largement jusqu'à ~1200 px : mesurées, les sept
+         * boutons occupent 482 px, et la barre en offre plus du double sur un
+         * portable 1440. Elles ne s'effacent donc qu'en dessous, là où la
+         * rangée finirait vraiment par se couper en deux. */
+        @media (max-width: 1200px) {
+            .btn-tool { min-width: 40px; padding: 5px 7px; }
+            .btn-tool > span { display: none; }
+        }
+
+        .btn-icon {
+            padding: 0;
+            width: 30px; height: 28px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            line-height: 1;
+        }
+
+        /* ------------------------------------------------------- Champs */
+        input, select {
+            background: var(--field);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 12px;
+        }
+        input:focus, select:focus { outline: none; border-color: var(--border-strong); }
+        input[type=color] {
+            padding: 3px; height: 30px; width: 42px; cursor: pointer;
+            background: var(--field);
+        }
+        input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type=color]::-webkit-color-swatch { border: 1px solid var(--border); border-radius: 2px; }
+        input[type=checkbox] { accent-color: var(--text-dim); }
+        input[type=number]::-webkit-outer-spin-button,
+        input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        input[type=number] { -moz-appearance: textfield; }
+
+        /* Sliders entièrement redessinés : plus aucune teinte bleue système. */
+        input[type=range] {
+            -webkit-appearance: none;
+            appearance: none;
+            background: transparent;
+            padding: 0;
+            border: none;
+            height: 18px;
+            cursor: pointer;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            height: 3px;
+            border-radius: 2px;
+            background: var(--border);
+        }
+        input[type=range]::-moz-range-track {
+            height: 3px;
+            border-radius: 2px;
+            background: var(--border);
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 13px; height: 13px;
+            margin-top: -5px;
+            border-radius: 50%;
+            background: var(--text-dim);
+            border: 1px solid var(--surface-3);
+            transition: background-color .12s;
+        }
+        input[type=range]::-moz-range-thumb {
+            width: 12px; height: 12px;
+            border-radius: 50%;
+            background: var(--text-dim);
+            border: 1px solid var(--surface-3);
+        }
+        input[type=range]:hover::-webkit-slider-thumb { background: #000; }
+        input[type=range]:hover::-moz-range-thumb { background: #000; }
+        input[type=range]:disabled { opacity: .4; cursor: not-allowed; }
+
+        /* Barres de défilement : mêmes matériaux que les curseurs — piste fine
+         * et creusée, poignée sombre. Celles de Chrome jurent avec le reste. */
+        .scroller, .modal-box { scrollbar-width: thin; scrollbar-color: var(--text-dim) transparent; }
+        .scroller::-webkit-scrollbar, .modal-box::-webkit-scrollbar { width: 9px; height: 9px; }
+        .scroller::-webkit-scrollbar, .modal-box::-webkit-scrollbar-track { background: transparent; }
+        .scroller::-webkit-scrollbar, .modal-box::-webkit-scrollbar-thumb {
+            background: var(--text-dim);
+            border: 3px solid transparent;
+            background-clip: content-box;
+            border-radius: 5px;
+        }
+        .scroller::-webkit-scrollbar, .modal-box::-webkit-scrollbar-thumb:hover { background: #000; background-clip: content-box; }
+        .scroller::-webkit-scrollbar, .modal-box::-webkit-scrollbar-corner { background: transparent; }
+
+        /* --------------------------------------------- Fenêtre de cadrage */
+        /* En recadrage, la scène est le média à son format d'origine, et c'est un
+         * cadre au format du canevas qui se promène dessus. L'inverse — faire
+         * glisser le média dans un cadre fixe — cachait justement ce qu'on est en
+         * train d'écarter. En « ratio d'origine », la scène redevient le canevas :
+         * le média y entre en entier et le fond choisi apparaît sur les côtés. */
+        /* Aperçu de page PDF. Pas de recadrage ici : on ne fait que montrer de
+         * quelle page il s'agit, le cadrage vient après, dans #crop-screen. */
+        #pdf-stage {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            height: 38vh;
+            background: var(--sunken);
+            border: 1px solid var(--border-strong);
+        }
+        #pdf-preview {
+            max-width: 100%;
+            max-height: 100%;
+            /* Le fond du papier est blanc : sans cela une page très claire se
+             * confondrait avec le creux du cadre. */
+            box-shadow: 0 2px 10px rgba(0,0,0,.45);
+        }
+        /* `flex: none` : sans lui, la règle `.input-with-suffix input { flex: 1 }`
+         * étirerait le numéro de page sur toute la largeur de la fenêtre. */
+        #pdf-page { width: 5em; flex: none; text-align: center; }
+        #pdf-count { white-space: nowrap; }
+
+        #crop-stage {
+            position: relative;
+            margin: 0 auto 16px;
+            /* Jamais plus large que la modale : au-delà, la scène débordait et
+             * c'est le bord droit du cadre — l'information la plus utile de
+             * cette fenêtre — qui passait hors champ. `layoutCropStage` calcule
+             * déjà la place disponible ; cette borne est la ceinture. */
+            max-width: 100%;
+            overflow: hidden;
+            border: 1px solid var(--border-strong);
+            background-color: #ffffff;
+            cursor: grab;
+            touch-action: none;   /* le glisser ne doit pas faire défiler la page */
+            user-select: none;
+        }
+        #crop-stage.dragging { cursor: grabbing; }
+        /* Rien à déplacer : en « ratio d'origine », ou sur un axe sans jeu. */
+        #crop-stage.locked { cursor: default; }
+        #crop-stage > img, #crop-stage > video {
+            position: absolute;
+            display: block;
+            object-fit: fill;
+            /* Sans cela, la souris déclenche le glisser-déposer natif de l'image au
+             * bout de quelques pixels : le navigateur envoie un `pointercancel` et
+             * le déplacement s'arrête net — le cadrage paraissait bloqué. */
+            pointer-events: none;
+            -webkit-user-drag: none;
+        }
+        /* Le cadre retenu. L'ombre démesurée assombrit tout le reste de la scène,
+         * que l'`overflow: hidden` de celle-ci borne : on voit d'un coup d'œil ce
+         * qui entre dans le canevas et ce qui en sort. */
+        #crop-frame {
+            position: absolute;
+            box-sizing: border-box;
+            border: 1px solid #ffffff;
+            box-shadow: 0 0 0 4000px rgba(0,0,0,.5);
+            pointer-events: none;
+        }
+        .crop-hint {
+            margin: -8px 0 16px;
+            font-size: 11px;
+            line-height: 1.5;
+            color: var(--text-faint);
+        }
+
+        /* ------------------------------------------------ Écrans modaux */
+        .modal {
+            position: absolute;
+            inset: 0;
+            background: rgba(20,20,20,.62);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+        .modal-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 24px;
+            border-radius: 10px;
+            width: 420px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 16px 40px rgba(0,0,0,.45);
+        }
+        /* La fenêtre de cadrage a besoin de place : 420 px moins 24 px de
+         * padding ne laisseraient que 372 px de cadre. */
+        .modal-box.wide { width: 560px; }
+        .modal-box h2 {
+            margin: 0 0 20px;
+            font-size: 15px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--text-dim);
+        }
+        .form-group { margin-bottom: 16px; }
+        .form-group > label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            color: var(--text-faint);
+        }
+        .form-group input, .form-group select { width: 100%; }
+        .form-row { display: flex; gap: 12px; }
+        .form-row > .form-group { flex: 1; }
+        .checkbox-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+        .checkbox-row input { width: auto; }
+        .checkbox-row label { margin: 0; font-size: 12px; color: var(--text-dim); }
+
+        /* Pastilles de fond. Le fichier n'a aucun style de radio ni de segmented
+         * control, et un <select> cacherait derrière des mots ce qui est
+         * justement un choix visuel : on montre les couleurs elles-mêmes. */
+        .swatches { display: flex; gap: 6px; align-items: center; }
+        .swatch {
+            width: 28px; height: 28px;
+            padding: 0;
+            flex: none;
+            border: 1px solid var(--border-strong);
+            border-radius: 4px;
+        }
+        .swatch:hover:not(:disabled) { border-color: var(--text-dim); }
+        .swatch.active { outline: 2px solid var(--text); outline-offset: 1px; }
+        /* Sans ceci, `.form-group input { width: 100% }` étirerait le sélecteur
+         * de couleur sur toute la largeur de la modale. */
+        .swatches input[type=color] { flex: none; width: 42px; }
+
+        .input-with-button, .input-with-suffix { display: flex; gap: 6px; align-items: center; }
+        .input-with-button input, .input-with-suffix input { flex: 1; min-width: 0; }
+        .input-with-button button { flex-shrink: 0; }
+        .suffix {
+            flex-shrink: 0;
+            font-family: var(--tc-font);
+            font-size: 12px;
+            color: var(--text-faint);
+        }
+
+        /* ---------------------------------------------------- Barre haute */
+        .toolbar {
+            min-height: 56px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 6px 14px;
+            gap: 14px;
+            flex-shrink: 0;
+            flex-wrap: wrap; /* filet de sécurité : rien ne sort de l'écran */
+        }
+        .toolbar-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-right: 1px solid var(--border);
+            padding-right: 14px;
+            flex-shrink: 0;
+        }
+        .toolbar-group:last-child { border-right: none; padding-right: 0; }
+        /* Seule la bibliothèque se comprime : les actions restent toujours visibles. */
+        .toolbar-group.grow { flex: 1 1 200px; min-width: 0; }
+        .toolbar-actions {
+            margin-left: auto;
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+        .field { display: flex; flex-direction: column; gap: 3px; }
+        .field > label {
+            font-size: 9px;
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: .06em;
+        }
+
+        /* ------------------------------------------ Bibliothèque de brosses */
+        /* Hauteur fixe : sélectionner une brosse ne doit jamais faire varier la
+         * hauteur de la barre — seule la largeur des cartes bouge. */
+        /* La barre de défilement native est remplacée par un curseur identique
+         * à ceux de l'image : même matériau, et surtout une hauteur constante —
+         * une barre qui apparaît et disparaît faisait tressauter la toolbar. */
+        .lib-stack {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            min-width: 0;
+        }
+        #brush-library {
+            display: flex;
+            align-items: flex-start;
+            gap: 6px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            width: 100%;
+            /* 8 px en haut : la corbeille déborde de 6 px au-dessus de la carte
+             * et `overflow-y: hidden` la rognerait. */
+            height: 54px;
+            padding: 8px 2px 0;
+            scrollbar-width: none;
+        }
+        #brush-library::-webkit-scrollbar { display: none; }
+        /* `input.lib-slider` et non `.lib-slider` : `input[type=range]` compte
+         * un attribut, il l'emporterait sur une simple classe. */
+        input.lib-slider { width: 100%; height: 14px; margin: 0; }
+        input.lib-slider.idle { visibility: hidden; }
+        .brush-card {
+            position: relative;
+            flex-shrink: 0;
+            width: 62px;
+            height: 46px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 1px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 3px;
+            cursor: pointer;
+            text-align: center;
+            opacity: .72;
+            transition: width .16s ease, opacity .16s, background-color .16s,
+                        border-color .16s, transform .16s ease;
+        }
+        .brush-card canvas {
+            display: block;
+            width: 100%;
+            height: 24px;
+        }
+        .brush-card span {
+            display: block;
+            font-size: 9px;
+            color: var(--text-faint);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        /* Les brosses inactives se réduisent, la brosse active reste mise en avant.
+         *
+         * Le survol est réservé aux écrans qui en ont un. Sur une tablette,
+         * Safari émule le survol au premier appui : la carte s'étirait et
+         * sortait sa corbeille sans que le clic passe, et il fallait taper une
+         * seconde fois pour changer réellement de pinceau. Sans règle `:hover`
+         * applicable, le premier appui redevient un clic. */
+        @media (hover: hover) and (pointer: fine) {
+            .brush-card:hover {
+                opacity: 1;
+                border-color: var(--border-strong);
+                transform: translateY(-2px);
+            }
+            .brush-card:hover .remove { display: flex; }
+            .brush-card .remove:hover:not(:disabled) {
+                background: var(--rec-hover);
+                border-color: var(--rec-hover);
+            }
+        }
+        /* Au doigt, la corbeille n'apparaît que sur le pinceau déjà choisi :
+         * elle reste atteignable, sans jamais tomber sous le doigt qui vise
+         * une *autre* carte. */
+        @media (hover: none), (pointer: coarse) {
+            .brush-card.active .remove { display: flex; }
+        }
+        /* Supprime le délai d'attente du double-tap (zoom) avant le clic. */
+        .brush-card, .brush-card .remove { touch-action: manipulation; }
+        .brush-card.active {
+            width: 104px;
+            opacity: 1;
+            background: var(--surface-3);
+            border-color: var(--text-dim);
+        }
+        .brush-card.active span { color: var(--text); }
+        .brush-card .remove {
+            position: absolute;
+            top: -6px; right: -6px;
+            width: 18px; height: 18px;
+            border-radius: 50%;
+            background: var(--rec);
+            border: 1px solid var(--rec);
+            color: #fff;
+            padding: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* -------------------------------------------------------- Corps */
+        .main { flex: 1; display: flex; min-height: 0; }
+        .stage { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+        /* ------------------------------------------------- Panneau latéral */
+        #panel {
+            width: 268px;
+            flex-shrink: 0;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+            overflow-y: auto;
+            padding: 0 0 16px;
+        }
+        #panel-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 12px 12px 10px;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            background: var(--surface);
+            z-index: 2;
+        }
+        .panel-title-block { min-width: 0; flex: 1; }
+        #panel-toggle {
+            flex-shrink: 0;
+            width: 22px; height: 22px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            line-height: 1;
+            background: transparent;
+            border-color: var(--border);
+            color: var(--text-dim);
+        }
+
+        /* Panneau replié : il ne reste qu'un onglet, et l'image récupère la place. */
+        #panel-tab-label { display: none; }
+        #panel.collapsed {
+            width: 30px;
+            overflow: hidden;
+        }
+        #panel.collapsed #panel-header {
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 3px;
+            border-bottom: none;
+        }
+        #panel.collapsed .panel-title-block,
+        #panel.collapsed #panel-params,
+        #panel.collapsed .stack { display: none; }
+        #panel.collapsed #panel-tab-label {
+            display: block;
+            writing-mode: vertical-rl;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            color: var(--text-faint);
+            white-space: nowrap;
+        }
+        #panel h3 {
+            margin: 0 0 3px;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: .02em;
+        }
+        #panel .hint { font-size: 11px; color: var(--text-faint); margin: 0; }
+        #panel .stack { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 0; }
+
+        /* Sections repliables */
+        .section { border-bottom: 1px solid var(--border); }
+        .section-head {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 10px 16px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .07em;
+            color: var(--text-dim);
+            text-align: left;
+        }
+        .section-head:hover:not(:disabled) { background: var(--surface-2); border-color: transparent; }
+        .section-head .caret {
+            font-size: 8px;
+            width: 8px;
+            color: var(--text-faint);
+            transition: transform .15s;
+        }
+        .section.collapsed .section-head .caret { transform: rotate(-90deg); }
+        .section-body { padding: 2px 16px 14px; }
+        .section.collapsed .section-body { display: none; }
+
+        /* ---------------------------------------------- Ligne de paramètre */
+        .param { margin-bottom: 11px; }
+        .param:last-child { margin-bottom: 2px; }
+        .param-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            font-size: 11px;
+            color: var(--text-dim);
+            margin-bottom: 3px;
+        }
+        .param-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .param-row input[type=range] { flex: 1; min-width: 0; }
+        .param-step {
+            flex-shrink: 0;
+            width: 18px; height: 18px;
+            padding: 0;
+            font-size: 12px;
+            line-height: 1;
+            border-radius: 3px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .param-step:hover:not(:disabled) { color: var(--text); background: var(--surface-3); }
+        .param-value {
+            flex-shrink: 0;
+            width: 52px;
+            padding: 3px 4px;
+            text-align: right;
+            font-family: var(--tc-font);
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+        }
+        .param-unit {
+            flex-shrink: 0;
+            width: 14px;
+            font-size: 10px;
+            color: var(--text-faint);
+        }
+        .param select { width: 100%; }
+
+        /* ------------------------------------------------ Zone de travail */
+        #workspace {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            /* Aucune marge : l'image occupe tout l'espace laissé libre par les
+             * panneaux, et vient au contact des bords. */
+            padding: 0;
+            position: relative;
+            min-width: 0;
+            min-height: 0;
+            overflow: hidden;
+            background: var(--workspace);
+        }
+        /* Le zoom agit sur la taille réelle du conteneur, pas sur `transform` :
+         * une couche promue par transform est composée dans un autre chemin
+         * colorimétrique, et l'image y perdait visiblement de la saturation. */
+        #media-container {
+            position: relative;
+            box-shadow: 0 6px 22px rgba(0,0,0,.35);
+            background-color: #ffffff;
+            flex-shrink: 0;
+            overflow: hidden;
+        }
+        #media-container.panning { cursor: grabbing; }
+
+        /* Défilement de l'image quand elle déborde du plan de travail. */
+        .pan-slider {
+            position: absolute;
+            z-index: 15;
+            opacity: .5;
+            transition: opacity .15s;
+        }
+        .pan-slider:hover, .pan-slider:focus { opacity: 1; }
+        .pan-slider[hidden] { display: none; }
+        #pan-x { left: 10px; right: 46px; bottom: 2px; }
+        #pan-y {
+            top: 42px; bottom: 22px; right: 2px;
+            width: 18px;
+            /* `height: auto` est indispensable : la hauteur fixe des sliders
+             * horizontaux l'emporterait sur l'étirement top/bottom. */
+            height: auto;
+            writing-mode: vertical-lr;
+            direction: rtl;
+        }
+        #pan-y::-webkit-slider-runnable-track { width: 3px; height: 100%; }
+        #pan-y::-webkit-slider-thumb { margin-top: 0; margin-left: -5px; }
+        /* Damier de transparence : un dégradé conique découpe chaque tuile en
+         * quatre quadrants alternés, soit des cases de la moitié de la tuile.
+         * Le PNG en data-URI qui servait ici avait un IDAT corrompu (CRC
+         * invalide, flux zlib tronqué) : aucun navigateur ne le décodait, et on
+         * ne voyait donc que la couleur posée dessous. Les deux teintes sont
+         * maintenant écrites, la case claire comprise — le damier doit se lire
+         * quelle que soit la couleur de fond de l'élément. */
+        .bg-checker {
+            background-color: #ffffff;
+            background-image: conic-gradient(#d0d0d0 25%, #ffffff 0 50%, #d0d0d0 0 75%, #ffffff 0);
+            background-size: 16px 16px;
+        }
+        /* Sur une pastille de 28 px, une tuile de 16 px ne tiendrait pas deux fois. */
+        .swatch.bg-checker { background-size: 10px 10px; }
+        /* Taille et position sont écrites en pourcentages par `applyMediaFit()`
+         * (static/app.js) : c'est ce qui permet de letterboxer ou de recadrer
+         * sans passer par `transform`, dont la couche composited décalait
+         * visiblement la saturation (voir dev/brief.md). Les valeurs ci-dessous ne
+         * servent qu'avant l'arrivée des métadonnées du média. */
+        #bg-media {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            object-fit: contain;
+            pointer-events: none;
+        }
+        #drawing-canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            cursor: crosshair;
+            z-index: 2;
+            touch-action: none; /* indispensable : empêche le scroll au stylet */
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
+        /* Le curseur système disparaît : c'est l'empreinte du pinceau qui le remplace. */
+        #drawing-canvas.brush-cursor { cursor: none; }
+        #cursor-overlay {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 3;
+            pointer-events: none;
+        }
+
+        /* Commandes de zoom : repliées en une loupe, déployées au survol.
+         * Toujours par-dessus l'image — elles ne doivent jamais lui prendre
+         * de place, sinon le « fit » n'utilise plus toute la hauteur. */
+        #zoom-controls {
+            position: absolute;
+            top: 8px; right: 8px;
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            background: rgba(126,126,126,.9);
+            border: 1px solid var(--border);
+            border-radius: 15px;
+            padding: 3px;
+            z-index: 20;
+            opacity: .55;
+            transition: opacity .15s;
+        }
+        #zoom-controls:hover, #zoom-controls:focus-within, #zoom-controls.open { opacity: 1; }
+        #zoom-controls .zoom-more {
+            display: none;
+            align-items: center;
+            gap: 3px;
+        }
+        #zoom-controls:hover .zoom-more,
+        #zoom-controls:focus-within .zoom-more,
+        #zoom-controls.open .zoom-more { display: flex; }
+        #zoom-loupe svg { display: block; }
+        #zoom-loupe {
+            border-radius: 50%;
+            width: 24px; height: 24px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border-color: transparent;
+        }
+        #zoom-controls button { background: transparent; border-color: transparent; }
+        #zoom-controls button:hover:not(:disabled) { background: var(--surface-3); border-color: transparent; }
+        #zoom-level {
+            min-width: 42px;
+            text-align: center;
+            font-family: var(--tc-font);
+            font-size: 11px;
+            color: var(--text);
+            font-variant-numeric: tabular-nums;
+        }
+        #shortcut-hud {
+            position: absolute;
+            left: 50%;
+            bottom: 18px;
+            transform: translateX(-50%);
+            padding: 7px 12px;
+            border: 1px solid var(--border-strong);
+            border-radius: 999px;
+            background: rgba(102,102,102,.94);
+            color: var(--text);
+            font-size: 12px;
+            font-weight: 600;
+            box-shadow: 0 8px 22px rgba(0,0,0,.34);
+            z-index: 24;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity .12s;
+            white-space: nowrap;
+        }
+        #shortcut-hud.show { opacity: 1; }
+
+        /* ------------------------------------------------- Lecteur média */
+        #transport {
+            flex-shrink: 0;
+            background: var(--surface);
+            border-top: 1px solid var(--border);
+            padding: 0 14px 8px;
+        }
+        #transport.collapsed .tp-body { display: none; }
+        /* Sans média, il ne reste que l'en-tête et son bouton de sélection. */
+        #transport.no-media .tp-body { display: none; }
+        .tp-btn {
+            flex-shrink: 0;
+            padding: 6px 8px;
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+        }
+        .tp-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 0;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: .07em;
+            color: var(--text-faint);
+        }
+        .tp-head button {
+            background: transparent;
+            border: none;
+            padding: 2px 4px;
+            color: var(--text-faint);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: .07em;
+        }
+        .tp-head button:hover:not(:disabled) { background: transparent; color: var(--text); }
+        /* La croix suit le nom du fichier : elle libère le média qu'elle désigne.
+         * Sans taille propre, elle hériterait des 10 px des boutons de l'en-tête
+         * et deviendrait une cible minuscule. */
+        .tp-close {
+            font-size: 15px;
+            line-height: 1;
+            padding: 0 2px;
+        }
+        .tp-close:hover:not(:disabled) { color: var(--rec); }
+        .tp-head .caret { font-size: 8px; display: inline-block; transition: transform .15s; }
+        #transport.collapsed .tp-head .caret { transform: rotate(-90deg); }
+        .tp-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .tp-row + .tp-row { margin-top: 8px; }
+        .tp-row.sub { gap: 6px; font-size: 11px; color: var(--text-faint); }
+        .tp-row.sub label {
+            text-transform: uppercase;
+            font-size: 9px;
+            letter-spacing: .06em;
+        }
+        .tp-spacer { flex: 1; }
+        .tc {
+            font-family: var(--tc-font);
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -.02em;
+            white-space: nowrap;
+        }
+        .tc.dim { color: var(--text-faint); }
+        .tc-input {
+            width: 92px;
+            padding: 3px 5px;
+            font-family: var(--tc-font);
+            font-size: 11px;
+            text-align: center;
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* Barre de progression : scrub + zone IN/OUT + poignées */
+        .tp-track {
+            position: relative;
+            flex: 1;
+            min-width: 0;
+            height: 22px;
+            cursor: pointer;
+            touch-action: none;
+        }
+        .tp-track::before {
+            content: '';
+            position: absolute;
+            left: 0; right: 0; top: 9px;
+            height: 4px;
+            border-radius: 2px;
+            background: var(--surface-3);
+        }
+        .tp-range {
+            position: absolute;
+            top: 9px; height: 4px;
+            background: var(--border-strong);
+        }
+        .tp-progress {
+            position: absolute;
+            top: 9px; height: 4px;
+            border-radius: 2px 0 0 2px;
+            background: var(--text-dim);
+        }
+        .tp-playhead {
+            position: absolute;
+            top: 2px;
+            width: 2px; height: 18px;
+            margin-left: -1px;
+            background: var(--text);
+            border-radius: 1px;
+            pointer-events: none;
+        }
+        .tp-handle {
+            position: absolute;
+            top: 3px;
+            width: 9px; height: 16px;
+            margin-left: -4.5px;
+            background: var(--surface-3);
+            border: 1px solid var(--border-strong);
+            border-radius: 2px;
+            cursor: ew-resize;
+            touch-action: none;
+        }
+        .tp-handle:hover, .tp-handle.dragging { background: var(--text-dim); border-color: var(--text); }
+        .tp-handle.in  { border-left-width: 3px; }
+        .tp-handle.out { border-right-width: 3px; }
+        .tp-track.locked, .tp-track.locked .tp-handle { cursor: not-allowed; }
+        #transport.locked .tp-handle { display: none; }
+
+        /* --------------------------------------------------- Superpositions */
+        #countdown {
+            display: none;
+            position: absolute;
+            inset: 0;
+            background: rgba(20,20,20,.55);
+            color: #fff;
+            font-size: 150px;
+            font-weight: 200;
+            z-index: 300;
+            justify-content: center;
+            align-items: center;
+        }
+        #render-overlay {
+            display: none;
+            position: absolute;
+            inset: 0;
+            background: rgba(24,24,24,.88);
+            color: #f0f0f0;
+            z-index: 200;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 6px;
+        }
+        #render-overlay h2 { margin: 0; font-size: 15px; font-weight: 600; }
+        #render-overlay .btn-quiet { color: #d8d8d8; border-color: #666; }
+        #render-overlay .btn-quiet:hover:not(:disabled) { background: #3a3a3a; color: #fff; }
+        #project-loading {
+            display: none;
+            position: absolute;
+            inset: 0;
+            background: rgba(24,24,24,.88);
+            color: #f0f0f0;
+            z-index: 210;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 6px;
+        }
+        #project-loading h2 { margin: 0; font-size: 15px; font-weight: 600; }
+        #project-loading-bar { width: 0; height: 100%; background: #3fae72; transition: width .08s; }
+        .progress-bar-container {
+            width: 320px; height: 6px;
+            background: #3d3d3d;
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        #progress-bar { width: 0; height: 100%; background: #3fae72; transition: width .12s; }
+        #render-detail { color: #b8b8b8; font-size: 12px; margin: 0; }
+
+        /* ---------------------------------------------------- Mode tablette */
+        /* Une seule couleur d'accent supplémentaire, très sobre : le mode
+         * tablette est un état de l'application, pas une action critique. */
+        #btn-tablet.armed { background: var(--text-dim); color: #f0f0f0; border-color: var(--text-dim); }
+
+        /* Bandeau du poste pendant que la tablette dessine. Volontairement en
+         * haut du plan de travail et non par-dessus l'image : l'écran du poste
+         * sert à juger le tracé, le masquer irait contre son unique raison
+         * d'être. */
+        #viewer-overlay {
+            display: none;
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            z-index: 30;
+            align-items: center;
+            gap: 12px;
+            padding: 7px 12px;
+            background: rgba(35,35,35,.92);
+            color: #f0f0f0;
+            font-size: 11px;
+            letter-spacing: .05em;
+        }
+        #viewer-overlay strong {
+            text-transform: uppercase;
+            letter-spacing: .1em;
+            font-size: 10px;
+        }
+        #viewer-overlay .dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            background: #3fae72;
+            flex-shrink: 0;
+            animation: pulse 1.8s ease-in-out infinite;
+        }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+        #viewer-overlay .spacer { flex: 1; }
+        #viewer-overlay .meta { color: #b8b8b8; font-family: var(--tc-font); }
+        #viewer-overlay button {
+            padding: 4px 10px;
+            font-size: 11px;
+            background: transparent;
+            border-color: #7a7a7a;
+            color: #f0f0f0;
+        }
+        #viewer-overlay button:hover:not(:disabled) { background: #4a4a4a; border-color: #9a9a9a; }
+        /* L'écran suiveur ne dessine plus : le curseur le dit avant que le
+         * stylet ne le découvre. */
+        body.viewing #drawing-canvas { cursor: not-allowed; }
+        /* La lecture appartient aussi à celui qui a le stylet. Laisser le
+         * suiveur déplacer son curseur le désynchroniserait sans que l'autre
+         * écran en sache rien : les deux montreraient alors des images
+         * différentes du même rush. */
+        body.viewing #transport { pointer-events: none; opacity: .45; }
+
+        /* D'où vient l'image affichée : le rush lui-même, ou sa copie de
+         * lecture. La question revient sans cesse — « est-ce que je regarde le
+         * vrai fichier ? » — et la réponse n'était visible qu'en ouvrant le
+         * panneau des proxys. Discret, dans un coin, mais toujours là. */
+        #media-source-badge {
+            position: absolute;
+            left: 10px;
+            top: 10px;
+            z-index: 25;
+            padding: 2px 7px;
+            border-radius: 9px;
+            font-size: 9px;
+            letter-spacing: .09em;
+            text-transform: uppercase;
+            color: #000;
+            background: rgba(245,245,245,.9);
+            border: 1px solid var(--border);
+            pointer-events: none;
+            opacity: .75;
+        }
+        #media-source-badge[hidden] { display: none; }
+        /* Le proxy se signale : ce n'est pas le fichier d'origine qu'on voit.
+         * Teinte foncée : la pastille est claire, un ocre pâle s'y effacerait. */
+        #media-source-badge.is-proxy { color: #7a5c00; }
+        /* En mode tablette, le coin haut-gauche appartient à la bulle des
+         * pinceaux : le badge s'y superposait. Il passe en bas à droite, seul
+         * coin que les bulles laissent libre. */
+        body.tablet #media-source-badge {
+            top: auto; left: auto;
+            right: 12px; bottom: 12px;
+        }
+
+        /* Préparation du proxy : bloquant, parce qu'il n'y a rien à faire
+         * d'utile tant que le média n'est pas lisible. */
+        #media-prep {
+            display: none;
+            position: absolute;
+            inset: 0;
+            background: rgba(24,24,24,.88);
+            color: #f0f0f0;
+            z-index: 210;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 6px;
+        }
+        #media-prep h2 { margin: 0; font-size: 15px; font-weight: 600; }
+        /* Un transcodage dure parfois plusieurs minutes : s'être trompé de
+         * rush ne doit pas condamner à les attendre. */
+        #media-prep-cancel { margin-top: 12px; }
+        body.tablet #media-prep-cancel { display: none; }
+        #media-prep p { margin: 0; font-size: 12px; color: #b8b8b8; }
+        #media-prep-bar { width: 0; height: 100%; background: #3fae72; transition: width .12s; }
+
+        /* Appairage */
+        #tablet-qr {
+            display: flex;
+            justify-content: center;
+            padding: 14px;
+            background: #fff;
+            border-radius: 8px;
+            margin-bottom: 14px;
+        }
+        #tablet-qr img { width: 208px; height: 208px; display: block; image-rendering: pixelated; }
+        #tablet-url {
+            display: block;
+            font-family: var(--tc-font);
+            font-size: 12px;
+            text-align: center;
+            word-break: break-all;
+            padding: 8px;
+            background: var(--sunken);
+            border-radius: 4px;
+            margin-bottom: 12px;
+        }
+        #tablet-state { font-size: 12px; color: var(--text-dim); margin: 0 0 16px; text-align: center; }
+        .notice {
+            font-size: 11px;
+            line-height: 1.5;
+            color: var(--text-faint);
+            border-left: 2px solid var(--border);
+            padding-left: 10px;
+            margin-bottom: 16px;
+        }
+        /* Sous un réglage, la note explique ce que le choix produit : elle se
+         * colle donc à lui plutôt que de flotter comme un paragraphe. */
+        .form-group .notice { margin: 7px 0 0; }
+
+        /* Badge de la tablette : petit, permanent, en bas de son écran. */
+        #tablet-badge {
+            display: none;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 14px;
+            background: var(--surface);
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--text-faint);
+            flex-shrink: 0;
+        }
+        #tablet-badge .dot { width: 7px; height: 7px; border-radius: 50%; background: #3fae72; }
+        #tablet-badge.offline .dot { background: var(--rec); }
+
+        /* Fin de session : opaque et couvrant tout, y compris la barre d'outils.
+         * Une session rompue n'est pas un incident réseau — rien de ce qu'on
+         * ferait ici ne repartirait, donc rien ne doit rester cliquable. */
+        #session-over {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 400;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            padding: 32px;
+            text-align: center;
+            background: var(--bg);
+        }
+        #session-over h2 { margin: 0; font-size: 20px; font-weight: 600; }
+        #session-over p { margin: 0; font-size: 13px; color: var(--text-dim); max-width: 34em; }
+        #session-over .hint { font-size: 12px; color: var(--text-faint); line-height: 1.6; }
+        /* Sur la tablette, l'export et la configuration n'existent pas :
+         * ils restent la prérogative du poste. */
+        body.tablet #btn-export,
+        body.tablet #btn-tablet { display: none; }
+
+        body.tablet .toolbar,
+        body.tablet .status-line,
+        body.tablet #tablet-badge { display: none; }
+        body.tablet .main,
+        body.tablet .stage { position: relative; }
+        body.tablet #workspace,
+        body.tablet #media-container,
+        body.tablet #drawing-canvas {
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body.tablet #workspace { flex: 1; min-height: 0; }
+        body.tablet #media-container { box-shadow: none; }
+        body.tablet #zoom-controls {
+            top: 12px;
+            right: 12px;
+            z-index: 95;
+        }
+        body.tablet #transport {
+            display: none;
+            position: fixed;
+            left: 12px;
+            right: 12px;
+            bottom: 12px;
+            z-index: 90;
+            padding: 0 16px 10px;
+            border: 1px solid var(--border-strong);
+            border-radius: 18px;
+            background: rgba(113,113,113,.94);
+            box-shadow: 0 14px 40px rgba(0,0,0,.38);
+            transition: opacity .2s, transform .25s;
+        }
+        /* La préparation du proxy passe derrière les bulles. Armer le mode
+         * tablette déclenche souvent un transcodage, et son voile noir couvrait
+         * l'interface entière : plus un bouton atteignable le temps de la
+         * préparation. Il reste au-dessus du canevas — c'est lui qu'il
+         * commente — mais sous tout ce qui flotte (transport 90, panneau 92,
+         * zoom 95, bulles 96). */
+        body.tablet #media-prep { z-index: 80; }
+        body.tablet #transport.tablet-overlay-open { display: block; }
+        body.tablet #transport.tablet-subtle { opacity: .4; }
+        body.tablet #transport #tp-toggle { display: none; }
+        body.tablet #transport.no-media .tp-body { display: none; }
+        body.tablet #panel {
+            position: fixed;
+            top: 68px;
+            right: 12px;
+            bottom: 12px;
+            width: min(312px, calc(100vw - 24px));
+            z-index: 92;
+            border: 1px solid var(--border-strong);
+            border-radius: 18px;
+            box-shadow: 0 14px 40px rgba(0,0,0,.38);
+            transform: translateX(calc(100% + 20px));
+            opacity: 0;
+            pointer-events: none;
+            transition: transform .25s, opacity .2s;
+        }
+        body.tablet.tablet-panel-open #panel {
+            transform: translateX(0);
+            opacity: 1;
+            pointer-events: auto;
+        }
+        #tablet-ui {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 96;
+            pointer-events: none;
+        }
+        body.tablet #tablet-ui { display: block; }
+        /* La couche est transparente aux doigts (`pointer-events: none` sur
+         * #tablet-ui) pour qu'un tracé démarré à côté d'une bulle traverse
+         * jusqu'au canevas. Chaque élément réellement cliquable doit donc
+         * reprendre la main explicitement — les deux boutons isolés autant que
+         * les bulles. Sans cela, le doigt les traversait et posait un point
+         * sur le canevas au lieu d'appuyer dessus. */
+        .tablet-bubble,
+        #tablet-return,
+        #tablet-fullscreen {
+            pointer-events: auto;
+        }
+        .tablet-bubble {
+            position: absolute;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .tablet-bubble.idle .tablet-bubble-toggle,
+        .tablet-bubble.idle .tablet-control-shell,
+        #tablet-return.idle,
+        #tablet-fullscreen.idle { opacity: .5; }
+        .tablet-bubble.is-open .tablet-bubble-toggle,
+        .tablet-bubble.is-open .tablet-bubble-panel,
+        .tablet-bubble:not(.idle) .tablet-bubble-toggle,
+        .tablet-bubble:not(.idle) .tablet-control-shell,
+        #tablet-return:not(.idle),
+        #tablet-fullscreen:not(.idle) { opacity: 1; }
+        .tablet-bubble-toggle,
+        #tablet-return,
+        #tablet-fullscreen {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 40px;
+            height: 40px;
+            padding: 0 12px;
+            border-radius: 20px;
+            background: rgba(126,126,126,.9);
+            border: 1px solid var(--border-strong);
+            color: var(--text);
+            box-shadow: 0 10px 26px rgba(0,0,0,.28);
+            backdrop-filter: blur(8px);
+            transition: opacity .2s, transform .2s, background-color .2s;
+            touch-action: manipulation;
+        }
+        .tablet-bubble-toggle:hover:not(:disabled),
+        #tablet-return:hover:not(:disabled),
+        #tablet-fullscreen:hover:not(:disabled) { background: rgba(151,151,151,.94); }
+        .tablet-bubble-panel {
+            display: none;
+            width: min(360px, calc(100vw - 24px));
+            max-height: min(72vh, 520px);
+            padding: 12px;
+            overflow: auto;
+            border-radius: 18px;
+            border: 1px solid var(--border-strong);
+            background: rgba(113,113,113,.96);
+            box-shadow: 0 14px 40px rgba(0,0,0,.38);
+            opacity: 1;
+        }
+        .tablet-bubble.is-open .tablet-bubble-panel { display: block; }
+        #tablet-brush-bubble { top: 12px; left: 12px; }
+        #tablet-brush-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        #tablet-brush-head strong {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--text-dim);
+        }
+        #tablet-brush-library-host .lib-stack,
+        #tablet-brush-library-host #brush-library,
+        #tablet-brush-library-host #brush-scroll { width: 100%; }
+        #tablet-brush-library-host #brush-library { padding-bottom: 6px; }
+        #tablet-brush-tools {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 12px;
+        }
+        #tablet-brush-tools .toolbar-group {
+            display: contents;
+        }
+        #tablet-brush-tools .field {
+            min-width: 0;
+            background: rgba(255,255,255,.08);
+            border: 1px solid rgba(64,64,64,.35);
+            border-radius: 12px;
+            padding: 8px 10px;
+        }
+        #tablet-brush-tools label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            color: var(--text-faint);
+        }
+        #tablet-brush-tools .swatches {
+            justify-content: space-between;
+            width: 100%;
+        }
+        #tablet-control-bubble {
+            top: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+            align-items: center;
+        }
+        .tablet-control-shell {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            transition: transform .25s, opacity .2s;
+        }
+        body.tablet.tablet-controls-docked .tablet-control-shell {
+            transform: translateY(calc(-100% + 18px));
+        }
+        #tablet-control-host {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 8px;
+            padding: 8px 10px;
+            border-radius: 18px;
+            border: 1px solid var(--border-strong);
+            background: rgba(113,113,113,.96);
+            box-shadow: 0 14px 40px rgba(0,0,0,.38);
+        }
+        #tablet-control-host button { min-width: 0; }
+        .tablet-edge-handle {
+            width: 34px;
+            height: 18px;
+            padding: 0;
+            border-radius: 999px;
+            border: 1px solid var(--border-strong);
+            background: rgba(126,126,126,.9);
+            color: var(--text);
+            font-size: 11px;
+            line-height: 1;
+        }
+        body.tablet.tablet-controls-docked .tablet-edge-handle { transform: rotate(180deg); }
+        #tablet-media-bubble { left: 12px; bottom: 12px; }
+        #tablet-return {
+            position: absolute;
+            top: 58px;
+            right: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .06em;
+        }
+        /* Masquer la barre d'adresse et les onglets de Safari : la seule voie
+         * depuis une page web est le plein écran demandé par un geste de
+         * l'utilisateur.ice. Safari sur iPad ne connaît que la version
+         * préfixée, d'où les deux appels côté script. Le bouton disparaît
+         * quand la plateforme ne sait pas le faire (iPhone) plutôt que de
+         * rester là sans effet — dans ce cas, « sur l'écran d'accueil »
+         * reste la vraie réponse (voir apple-mobile-web-app-capable). */
+        #tablet-fullscreen {
+            position: absolute;
+            top: 104px;
+            right: 12px;
+            font-size: 15px;
+        }
+        body.tablet.tablet-drawing #tablet-ui,
+        body.tablet.tablet-drawing #panel,
+        body.tablet.tablet-drawing #transport,
+        body.tablet.tablet-drawing #zoom-controls {
+            pointer-events: none;
+        }
+
+        .status-line {
+            padding: 5px 14px;
+            font-size: 11px;
+            color: var(--text-faint);
+            background: var(--surface);
+            border-top: 1px solid var(--border);
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        #status {
+            flex: 1;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* ------------------------------------------------ Gestion des proxys */
+        #btn-proxies {
+            flex-shrink: 0;
+            padding: 2px 8px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+            background: transparent;
+            border-color: var(--border);
+            color: var(--text-faint);
+        }
+        #btn-proxies:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+        #btn-shortcuts {
+            flex-shrink: 0;
+            width: 24px;
+            height: 24px;
+            padding: 0;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+            background: transparent;
+            border-color: var(--border);
+            color: var(--text-faint);
+        }
+        #btn-shortcuts:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+        body.tablet #btn-proxies,
+        body.tablet #btn-shortcuts { display: none; }
+
+        #help-screen .modal-box {
+            width: min(560px, calc(100vw - 32px));
+            max-height: min(72vh, 720px);
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        #help-screen h2 { margin: 0; }
+        #help-screen p {
+            margin: 0;
+            line-height: 1.5;
+            color: var(--text-dim);
+        }
+        .shortcut-list {
+            margin: 0;
+            padding: 14px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--sunken);
+            display: grid;
+            gap: 10px 14px;
+            grid-template-columns: minmax(170px, 220px) 1fr;
+            align-items: start;
+        }
+        .shortcut-list dt {
+            margin: 0;
+            font-family: var(--tc-font);
+            font-size: 12px;
+            color: var(--text);
+        }
+        .shortcut-list dd {
+            margin: 0;
+            line-height: 1.45;
+            color: var(--text-dim);
+        }
+        .shortcut-note {
+            font-size: 11px;
+            color: var(--text-faint);
+        }
+
+        /* Panneau flottant plutôt que modal : gérer le cache n'interrompt pas
+         * le travail, et l'on veut pouvoir regarder l'image en même temps. */
+        #proxy-panel {
+            display: none;
+            position: absolute;
+            right: 12px;
+            bottom: 34px;
+            width: 420px;
+            max-height: 60vh;
+            z-index: 120;
+            background: var(--surface);
+            border: 1px solid var(--border-strong);
+            border-radius: 8px;
+            box-shadow: 0 12px 32px rgba(0,0,0,.45);
+            flex-direction: column;
+            overflow: hidden;
+        }
+        #proxy-head {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+        }
+        #proxy-head h3 {
+            margin: 0;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--text-dim);
+        }
+        #proxy-total {
+            font-family: var(--tc-font);
+            font-size: 11px;
+            color: var(--text-faint);
+        }
+        #proxy-close {
+            margin-left: auto;
+            padding: 1px 7px;
+            font-size: 12px;
+            line-height: 1.3;
+            background: transparent;
+            border-color: transparent;
+            color: var(--text-faint);
+        }
+        #proxy-close:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+        #proxy-list { overflow-y: auto; padding: 4px 0; }
+        #proxy-empty {
+            padding: 18px 12px;
+            text-align: center;
+            font-size: 11px;
+            color: var(--text-faint);
+        }
+        .proxy-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 12px;
+            border-bottom: 1px solid rgba(86,86,86,.4);
+        }
+        .proxy-item:last-child { border-bottom: none; }
+        .proxy-info { flex: 1; min-width: 0; }
+        .proxy-name {
+            display: block;
+            font-size: 12px;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .proxy-meta {
+            display: block;
+            font-size: 10px;
+            color: var(--text-faint);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .proxy-size {
+            flex-shrink: 0;
+            font-family: var(--tc-font);
+            font-size: 11px;
+            color: var(--text-dim);
+            font-variant-numeric: tabular-nums;
+        }
+        /* Le proxy du rush affiché : le supprimer coupe l'image en cours. */
+        .proxy-item.in-use .proxy-name::after {
+            content: ' — à l’écran';
+            font-size: 10px;
+            color: var(--text-faint);
+        }
+        .proxy-item .remove {
+            flex-shrink: 0;
+            width: 22px; height: 22px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border-color: var(--border);
+            color: var(--text-faint);
+        }
+        .proxy-item .remove:hover:not(:disabled) {
+            background: var(--rec); border-color: var(--rec); color: #fff;
+        }
+        /* Les deux corrections manuelles côte à côte — elles sont l'inverse
+         * l'une de l'autre — et la purge sur sa propre ligne, parce qu'elle ne
+         * porte pas sur le même objet : le cache entier, pas le rush affiché. */
+        #proxy-foot {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            padding: 10px 12px;
+            border-top: 1px solid var(--border);
+            background: var(--sunken);
+        }
+        #proxy-foot button { padding: 6px 8px; font-size: 11px; }
+        #proxy-purge { grid-column: 1 / -1; }
+
+        /* Signal d'enregistrement : la seule chose qui change de couleur. */
+        body.recording .status-line { color: var(--rec); font-weight: 700; }
+        body.recording #media-container { box-shadow: 0 0 0 2px var(--rec), 0 6px 22px rgba(0,0,0,.35); }
+
+        /* Écrans peu hauts : on resserre sans jamais provoquer de scroll global. */
+        @media (max-height: 780px) {
+            .toolbar { min-height: 50px; padding: 4px 12px; }
+            #panel-header { padding: 10px 16px 8px; }
+            .section-head { padding: 8px 16px; }
+            .param { margin-bottom: 8px; }
+            #workspace { padding: 12px; }
+        }
+        @media (max-width: 1180px) {
+            #panel { width: 232px; }
+            .param-value { width: 46px; }
+        }
+    </style>
+    <link rel="icon" type="image/png" href="favicon.png">
+</head>
+<body>
+
+    <!-- ------------------------------------------------ Configuration ---- -->
+    <div id="setup-screen" class="modal">
+        <div class="modal-box">
+            <h2>Configuration de l'espace</h2>
+            <div class="form-group">
+                <label>Média d'arrière-plan (optionnel)</label>
+                <div class="input-with-button">
+                    <input type="text" id="setup-media-name" placeholder="Aucun média" readonly>
+                    <button id="setup-media-browse" class="btn-quiet" type="button">Parcourir…</button>
+                </div>
+                <!-- Repli si le sélecteur natif du serveur n'est pas disponible :
+                     le navigateur ne lira alors que les codecs qu'il connaît. -->
+                <input type="file" id="setup-media" accept="video/*, audio/*, image/*"
+                       style="display:none;">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Largeur (px)</label>
+                    <input type="number" id="setup-width" value="1920" min="16">
+                </div>
+                <div class="form-group">
+                    <label>Hauteur (px)</label>
+                    <input type="number" id="setup-height" value="1080" min="16">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Images par seconde (export)</label>
+                <select id="setup-fps">
+                    <option value="24">24 FPS</option>
+                    <option value="25" selected>25 FPS</option>
+                    <option value="30">30 FPS</option>
+                    <option value="50">50 FPS</option>
+                    <option value="60">60 FPS</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Couleur du fond</label>
+                <div class="swatches">
+                    <button type="button" class="swatch" data-bg="#ffffff"
+                            style="background:#ffffff" title="Blanc"></button>
+                    <button type="button" class="swatch" data-bg="#808080"
+                            style="background:#808080" title="Gris 50 %"></button>
+                    <button type="button" class="swatch" data-bg="#000000"
+                            style="background:#000000" title="Noir"></button>
+                    <button type="button" class="swatch bg-checker" data-bg="checker"
+                            style="background-color:#ffffff"
+                            title="Damier — aperçu de ce qui sera transparent à l'export"></button>
+                    <input type="color" id="setup-bg-color" value="#ffffff"
+                           title="Couleur personnalisée">
+                </div>
+            </div>
+            <div class="checkbox-row">
+                <input type="checkbox" id="setup-alpha" checked>
+                <label for="setup-alpha">Export ProRes 4444 avec fond transparent (alpha)</label>
+            </div>
+            <button id="btn-create" class="btn-strong" style="width:100%;padding:11px;">Lancer l'espace de travail</button>
+        </div>
+    </div>
+
+    <!-- ------------------------------------------------------ Dialogue export -->
+    <div id="export-screen" class="modal" style="display:none;">
+        <div class="modal-box">
+            <h2>Paramètres d'export</h2>
+            <div class="form-group">
+                <label>Type d'export</label>
+                <select id="export-mode">
+                    <option value="prores">ProRes 4444 (.mov) — montage</option>
+                    <option value="preview">Aperçu H.264 (.mp4)</option>
+                    <option value="pro">Export pro — 3 couches dans un dossier</option>
+                </select>
+                <p id="export-mode-hint" class="notice"></p>
+            </div>
+            <!-- Ce qui passe sous le tracé. Un seul réglage pour les deux
+                 formats simples : le média aplati, le fond uni, ou rien du
+                 tout — l'alpha, que seul le ProRes sait porter. -->
+            <div class="form-group" id="export-flatten-group">
+                <label>Sous le tracé</label>
+                <select id="export-flatten">
+                    <option value="media">Le média, aplati sur l'arrière-plan</option>
+                    <option value="solid">Fond uni — la couleur d'arrière-plan</option>
+                    <option value="alpha">Rien — couche alpha (ProRes seulement)</option>
+                </select>
+            </div>
+            <div class="checkbox-row" id="export-media-alpha-row" style="display:none;">
+                <input type="checkbox" id="export-media-alpha">
+                <label for="export-media-alpha">Couche média : garder l'alpha autour du média
+                    (pas d'arrière-plan)</label>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Largeur de sortie</label>
+                    <input type="number" id="export-width" min="16" step="2">
+                </div>
+                <div class="form-group">
+                    <label>Hauteur de sortie</label>
+                    <input type="number" id="export-height" min="16" step="2" disabled>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Images par seconde</label>
+                <select id="export-fps">
+                    <option value="24">24 FPS</option>
+                    <option value="25">25 FPS</option>
+                    <option value="30">30 FPS</option>
+                    <option value="50">50 FPS</option>
+                    <option value="60">60 FPS</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label id="export-name-label">Nom du fichier</label>
+                <div class="input-with-suffix">
+                    <input type="text" id="export-name" spellcheck="false">
+                    <span id="export-ext" class="suffix">.mov</span>
+                </div>
+                <p id="export-files" class="notice" style="display:none;"></p>
+            </div>
+            <div class="form-group">
+                <label>Dossier de destination</label>
+                <div class="input-with-button">
+                    <input type="text" id="export-dir" spellcheck="false">
+                    <button id="export-browse" class="btn-quiet" type="button">Parcourir…</button>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <button id="export-cancel" class="btn-quiet" style="flex:1;">Annuler</button>
+                <button id="export-go" class="btn-export" style="flex:2;">Lancer le rendu</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ------------------------------------------------- Appairage tablette -->
+    <div id="tablet-screen" class="modal" style="display:none;">
+        <div class="modal-box">
+            <h2>Contrôle par tablette</h2>
+            <div id="tablet-qr"></div>
+            <code id="tablet-url"></code>
+            <p id="tablet-state"></p>
+            <p id="tablet-nonet" class="notice" style="display:none;">
+                Aucune adresse réseau utilisable sur ce poste. Vérifiez qu'il est
+                bien connecté au même réseau (Wi-Fi ou Ethernet) que la tablette.
+            </p>
+            <p class="notice">
+                Scannez ce code avec la tablette — elle doit être sur le même réseau
+                local. Elle prendra la main sur le dessin et la lecture ; cet écran
+                suivra en direct. Le choix du rush et l'export restent sur ce poste.
+                Reprendre la main ne déconnecte pas la tablette : elle passe en
+                suiveuse et vous pouvez la lui rendre à tout moment.
+            </p>
+            <div class="form-row">
+                <button id="tablet-take" class="btn-quiet" style="flex:1;">Reprendre la main</button>
+                <button id="tablet-give" class="btn-quiet" style="flex:1;display:none;">Rendre la main à la tablette</button>
+                <button id="tablet-close" class="btn-strong" style="flex:1;">Fermer</button>
+            </div>
+            <div class="form-row">
+                <button id="tablet-end" class="btn-danger" style="flex:1;">Terminer la session</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- --------------------------------------------- Cadrage du média ---- -->
+    <!-- Le ratio du cadre est celui du canevas de tracé, jamais celui du média :
+         c'est le canevas qui décide du format de sortie. -->
+    <div id="crop-screen" class="modal" style="display:none;">
+        <div class="modal-box wide">
+            <h2>Cadrage du média</h2>
+            <p id="crop-hint" class="crop-hint"></p>
+            <div class="form-group">
+                <label>Ajustement</label>
+                <select id="crop-mode">
+                    <option value="contain">Conserver le média dans son ratio d'origine</option>
+                    <option value="crop">Recadrer le média au format du canevas</option>
+                </select>
+            </div>
+            <div id="crop-stage"><div id="crop-frame"></div></div>
+            <div class="form-group" id="crop-zoom-group">
+                <label>Zoom du média — glisser pour déplacer le cadre</label>
+                <div class="input-with-suffix">
+                    <input type="range" id="crop-zoom" min="100" max="400" step="1" value="100">
+                    <span id="crop-zoom-value" class="suffix">100 %</span>
+                </div>
+            </div>
+            <div class="form-row">
+                <button id="crop-cancel" class="btn-quiet" style="flex:1;">Annuler</button>
+                <button id="crop-apply" class="btn-strong" style="flex:2;">Appliquer</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ------------------------------------------- Choix de page (PDF) ---- -->
+    <!-- Un PDF n'a pas de page « par défaut » : on la demande avant d'ouvrir
+         quoi que ce soit. Une fois la page choisie, elle devient une image
+         ordinaire et suit exactement le parcours des autres médias — cadrage
+         compris. -->
+    <div id="pdf-screen" class="modal" style="display:none;">
+        <div class="modal-box wide">
+            <h2>Page du PDF</h2>
+            <p id="pdf-hint" class="crop-hint"></p>
+            <div id="pdf-stage"><img id="pdf-preview" alt=""></div>
+            <div class="form-group">
+                <label>Page</label>
+                <div class="input-with-suffix">
+                    <button id="pdf-prev" class="btn-icon" type="button"
+                            title="Page précédente" aria-label="Page précédente">‹</button>
+                    <input type="number" id="pdf-page" min="1" step="1" value="1">
+                    <span id="pdf-count" class="suffix"></span>
+                    <button id="pdf-next" class="btn-icon" type="button"
+                            title="Page suivante" aria-label="Page suivante">›</button>
+                </div>
+            </div>
+            <div class="form-row">
+                <button id="pdf-cancel" class="btn-quiet" style="flex:1;">Annuler</button>
+                <button id="pdf-open" class="btn-strong" style="flex:2;">Ouvrir cette page</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ----------------------------------------------------------- Barre -->
+    <div class="toolbar">
+        <div class="toolbar-group grow">
+            <div class="lib-stack">
+                <div id="brush-library"></div>
+                <input type="range" id="brush-scroll" class="lib-slider" min="0" max="100" value="0"
+                       aria-label="Faire défiler la bibliothèque de pinceaux">
+            </div>
+        </div>
+
+        <div class="toolbar-group">
+            <div class="field">
+                <label>Couleur</label>
+                <input type="color" id="prop-color" value="#111111">
+            </div>
+            <!-- La barre d'outils est toujours visible, contrairement au corps du
+                 bandeau média : c'est ici que le fond doit rester réglable. -->
+            <div class="field">
+                <label>Fond</label>
+                <div class="swatches">
+                    <input type="color" id="bg-color" value="#ffffff"
+                           title="Couleur du fond du canevas">
+                    <button type="button" id="bg-checker-btn" class="btn-icon"
+                            title="Damier — aperçu de ce qui sera transparent à l'export">▦</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="toolbar-actions">
+            <button id="btn-tablet" class="btn-quiet btn-tool"
+                    title="Piloter la session depuis une tablette du réseau local"
+                    aria-label="Mode tablette">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="5" y="2.5" width="14" height="19" rx="2"/>
+                    <path d="M9.5 18.5h5"/>
+                    <path d="M8.4 10.4a5.4 5.4 0 0 1 7.2 0"/>
+                    <path d="M10.2 12.6a2.8 2.8 0 0 1 3.6 0"/>
+                    <circle cx="12" cy="14.9" r=".9" class="filled"/>
+                </svg>
+                <span>Tablette</span>
+            </button>
+            <button id="btn-clear" class="btn-quiet btn-tool"
+                    title="Effacer la zone de dessin" aria-label="Effacer le tracé">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4.6 15.1 11 8.7a2 2 0 0 1 2.8 0l3.1 3.1a2 2 0 0 1 0 2.8l-3.7 3.7H7.2l-2.6-2.6a1.6 1.6 0 0 1 0-2.6z"/>
+                    <path d="M9.3 19.2 15 13.5"/>
+                    <path d="m16.8 4.6 4.2 4.2M21 4.6l-4.2 4.2" class="mark"/>
+                </svg>
+                <span>Effacer</span>
+            </button>
+            <button id="btn-rec" class="btn-rec btn-tool">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6" class="filled"/></svg>
+                <span>REC</span>
+            </button>
+            <button id="btn-stop" class="btn-rec btn-tool" style="display:none;">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="1.5" class="filled"/></svg>
+                <span>Stop</span>
+            </button>
+            <button id="btn-preview" class="btn-tool" disabled aria-label="Prévisualiser le tracé">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" class="filled"/></svg>
+                <span>Préviz</span>
+            </button>
+            <button id="btn-export" class="btn-export btn-tool" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 3.5v11"/><path d="m7.8 10.4 4.2 4.2 4.2-4.2"/>
+                    <path d="M4.5 17v2.5h15V17"/>
+                </svg>
+                <span>Exporter</span>
+            </button>
+            <button id="btn-save-project" class="btn-quiet btn-tool"
+                    title="Enregistrer le projet (.lvn)" aria-label="Enregistrer le projet">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 3.5h10.5L19 7v13.5H5z"/>
+                    <path d="M8.5 3.5h6V8h-6z"/>
+                    <path d="M12 11.5v6"/><path d="m9.4 15 2.6 2.6 2.6-2.6" class="mark"/>
+                </svg>
+                <span>Save</span>
+            </button>
+            <button id="btn-load-project" class="btn-quiet btn-tool"
+                    title="Charger un projet .lvn" aria-label="Charger un projet">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 3.5h10.5L19 7v13.5H5z"/>
+                    <path d="M8.5 3.5h6V8h-6z"/>
+                    <path d="M15 15.4a3.4 3.4 0 1 1-1-2.4" class="mark"/>
+                    <path d="M14.2 10.4v2.7h-2.7" class="mark"/>
+                </svg>
+                <span>Load</span>
+            </button>
+            <input type="file" id="project-input" accept=".lvn,application/json" hidden>
+        </div>
+    </div>
+
+    <!-- -------------------------------------------------- Corps principal -->
+    <div class="main">
+        <div class="stage">
+            <div id="workspace">
+                <div id="media-container">
+                    <div id="bg-media"></div>
+                    <canvas id="drawing-canvas"></canvas>
+                    <canvas id="cursor-overlay"></canvas>
+                </div>
+
+                <input type="range" id="pan-x" class="pan-slider" hidden
+                       aria-label="Déplacer l’image horizontalement">
+                <input type="range" id="pan-y" class="pan-slider" hidden
+                       aria-label="Déplacer l’image verticalement">
+
+                <div id="zoom-controls">
+                    <button id="zoom-loupe" aria-label="Zoom"
+                            title="Zoom : Ctrl + molette ou pincement du pavé tactile&#10;Déplacement : glisser à deux doigts, ou clic molette">
+                        <svg width="13" height="13" viewBox="0 0 16 16" fill="none"
+                             stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                            <circle cx="6.8" cy="6.8" r="4.6"/>
+                            <path d="M10.3 10.3 L14 14" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                    <span class="zoom-more">
+                        <button id="zoom-out" class="btn-icon" title="Dézoomer (Ctrl −)">−</button>
+                        <span id="zoom-level">100 %</span>
+                        <button id="zoom-in" class="btn-icon" title="Zoomer (Ctrl +)">+</button>
+                        <button id="zoom-fit" style="padding:4px 8px;font-size:11px;"
+                                title="Ajuster à la fenêtre (Ctrl 0)">Fit</button>
+                    </span>
+                </div>
+                <div id="shortcut-hud" aria-live="polite" aria-atomic="true"></div>
+
+                <div id="viewer-overlay">
+                    <span class="dot"></span>
+                    <strong id="viewer-label">Contrôle en cours sur tablette</strong>
+                    <span id="viewer-brush" class="meta"></span>
+                    <span class="spacer"></span>
+                    <span class="meta">latence <span id="viewer-latency">—</span></span>
+                    <button id="viewer-takeover">Reprendre la main</button>
+                </div>
+
+                <div id="media-source-badge" hidden></div>
+                <div id="media-prep">
+                    <h2>Préparation du média…</h2>
+                    <p id="media-prep-name"></p>
+                    <p id="media-prep-reason"></p>
+                    <div class="progress-bar-container"><div id="media-prep-bar"></div></div>
+                    <p id="media-prep-percent">0 %</p>
+                    <button id="media-prep-cancel" class="btn-quiet" type="button">Annuler la préparation</button>
+                </div>
+
+                <div id="countdown">3</div>
+                <div id="render-overlay">
+                    <h2 id="render-title">Rendu en cours…</h2>
+                    <p id="render-detail">Préparation…</p>
+                    <div class="progress-bar-container"><div id="progress-bar"></div></div>
+                    <button id="render-cancel" class="btn-quiet">Annuler</button>
+                </div>
+                <div id="project-loading">
+                    <h2>Chargement du projet…</h2>
+                    <div class="progress-bar-container"><div id="project-loading-bar"></div></div>
+                </div>
+            </div>
+
+            <!-- Lecteur média maison : les contrôles natifs du navigateur sont masqués. -->
+            <div id="transport" class="no-media">
+                <div class="tp-head">
+                    <button id="tp-toggle"><span class="caret">▼</span> Média</button>
+                    <button id="tp-choose">Choisir un média…</button>
+                    <button id="tp-fit" style="display:none;">Cadrage…</button>
+                    <button id="tp-page" style="display:none;">Page…</button>
+                    <input type="file" id="media-input" accept="video/*, audio/*, image/*" style="display:none;">
+                    <span class="tp-spacer"></span>
+                    <span id="tp-name" class="tc dim"></span>
+                    <!-- Rendre le fond : on retombe sur la couleur du canevas. -->
+                    <button id="tp-clear" class="tp-close" style="display:none;"
+                            title="Retirer le média de fond" aria-label="Retirer le média de fond">×</button>
+                </div>
+                <div class="tp-body">
+                    <div class="tp-row">
+                        <button id="tp-back" class="tp-btn" title="Reculer de 10 secondes">−10 s</button>
+                        <button id="tp-frame-back" class="btn-icon" title="Image précédente">❘◀</button>
+                        <button id="tp-play" class="btn-icon" title="Lecture / Pause (Espace)">▶</button>
+                        <button id="tp-frame-fwd" class="btn-icon" title="Image suivante">▶❘</button>
+                        <button id="tp-fwd" class="tp-btn" title="Avancer de 10 secondes">+10 s</button>
+                        <span id="tp-current" class="tc">00:00:00:00</span>
+                        <div class="tp-track" id="tp-track">
+                            <div class="tp-range" id="tp-range"></div>
+                            <div class="tp-progress" id="tp-progress"></div>
+                            <div class="tp-playhead" id="tp-playhead"></div>
+                            <div class="tp-handle in" id="tp-in" title="Point IN"></div>
+                            <div class="tp-handle out" id="tp-out" title="Point OUT"></div>
+                        </div>
+                        <span id="tp-duration" class="tc dim">00:00:00:00</span>
+                    </div>
+                    <div class="tp-row sub">
+                        <label for="tp-in-tc">In</label>
+                        <input id="tp-in-tc" class="tc-input" value="00:00:00:00">
+                        <button id="tp-in-set" class="btn-quiet btn-icon" title="Définir le point IN à la tête de lecture">↧</button>
+                        <label for="tp-out-tc">Out</label>
+                        <input id="tp-out-tc" class="tc-input" value="00:00:00:00">
+                        <button id="tp-out-set" class="btn-quiet btn-icon" title="Définir le point OUT à la tête de lecture">↧</button>
+                        <button id="tp-reset" class="btn-quiet" style="padding:4px 8px;">Tout le média</button>
+                        <span class="tp-spacer"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <aside id="panel" class="scroller">
+            <div id="panel-header">
+                <button id="panel-toggle" title="Replier le panneau" aria-label="Replier le panneau">›</button>
+                <span id="panel-tab-label">Pinceau</span>
+                <div class="panel-title-block">
+                    <h3 id="panel-title">Pinceau</h3>
+                    <p class="hint" id="panel-hint"></p>
+                </div>
+            </div>
+            <div id="panel-params"></div>
+            <div class="stack">
+                <button id="btn-texture" class="btn-quiet">Charger une texture PNG…</button>
+                <input type="file" id="texture-input" accept="image/png,image/*" style="display:none;">
+                <button id="btn-save-preset">Enregistrer comme preset</button>
+                <button id="btn-reset-brush" class="btn-quiet">Réinitialiser le pinceau</button>
+                <button id="btn-delete-brush" class="btn-danger">Supprimer ce pinceau</button>
+            </div>
+        </aside>
+    </div>
+
+    <div id="tablet-badge">
+        <span class="dot"></span>
+        <span id="tablet-link">Connexion au poste…</span>
+    </div>
+
+    <!-- Fin de session, côté tablette. Sans écran dédié, une session rompue
+         laisserait un canevas parfaitement utilisable dont plus rien ne part. -->
+    <div id="session-over">
+        <h2>La session est terminée</h2>
+        <p id="session-over-detail">Le poste a fermé la session.</p>
+        <p class="hint">Le tracé reste affiché sur le poste, qui se charge de l’export.
+            Pour reprendre, demandez un nouveau code d’appairage.</p>
+    </div>
+
+    <div id="tablet-ui" aria-hidden="true">
+        <div id="tablet-brush-bubble" class="tablet-bubble idle">
+            <button id="tablet-brush-toggle" class="tablet-bubble-toggle"
+                    type="button" aria-label="Bibliothèque de pinceaux">✎</button>
+            <div id="tablet-brush-panel" class="tablet-bubble-panel scroller">
+                <div id="tablet-brush-head">
+                    <strong>Pinceaux</strong>
+                    <button id="tablet-brush-settings" class="btn-quiet" type="button">Réglages</button>
+                </div>
+                <div id="tablet-brush-library-host"></div>
+                <div id="tablet-brush-tools"></div>
+            </div>
+        </div>
+
+        <div id="tablet-control-bubble" class="tablet-bubble idle">
+            <div class="tablet-control-shell">
+                <div id="tablet-control-host"></div>
+                <button id="tablet-control-handle" class="tablet-edge-handle"
+                        type="button" aria-label="Afficher les contrôles">⌃</button>
+            </div>
+        </div>
+
+        <div id="tablet-media-bubble" class="tablet-bubble idle">
+            <button id="tablet-media-toggle" class="tablet-bubble-toggle"
+                    type="button" aria-label="Afficher le transport">▶</button>
+        </div>
+
+        <button id="tablet-return" class="idle" type="button"
+                aria-label="Rendre la main au poste">PC</button>
+
+        <button id="tablet-fullscreen" class="idle" type="button" style="display:none;"
+                aria-label="Passer en plein écran">⤢</button>
+    </div>
+
+    <!-- ------------------------------------------- Gestion des proxys -->
+    <div id="proxy-panel">
+        <div id="proxy-head">
+            <h3>Proxys de lecture</h3>
+            <span id="proxy-total">—</span>
+            <button id="proxy-close" aria-label="Fermer">✕</button>
+        </div>
+        <div id="proxy-list"></div>
+        <div id="proxy-empty">Aucun proxy en cache.</div>
+        <div id="proxy-foot">
+            <button id="proxy-force" class="btn-quiet"
+                    title="Fabrique une copie lisible du rush affiché, même s’il semblait déjà bon — à utiliser si l’aperçu reste noir">Transcoder ce rush</button>
+            <button id="proxy-bypass" class="btn-quiet"
+                    title="Sert le fichier d’origine sans copie de lecture — à utiliser si ce navigateur le lit très bien malgré l’analyse">Servir l’original</button>
+            <button id="proxy-purge" class="btn-danger">Tout supprimer</button>
+        </div>
+    </div>
+
+    <div id="help-screen" class="modal" style="display:none;">
+        <div class="modal-box">
+            <h2>Raccourcis clavier et souris</h2>
+            <p>Ces gestes ne s’activent que sur poste fixe / portable. Ils n’agissent jamais en mode tablette.</p>
+            <dl class="shortcut-list">
+                <dt>Alt + clic gauche + glisser</dt>
+                <dd>Ajuster la taille du pinceau — le curseur reste sur place le temps du réglage.</dd>
+                <dt>Alt + clic droit + glisser</dt>
+                <dd>Ajuster la dureté du pinceau — le curseur reste sur place.</dd>
+                <dt>O + clic + glisser</dt>
+                <dd>Ajuster l’opacité du pinceau — le curseur reste sur place.</dd>
+                <dt>E maintenu + clic</dt>
+                <dd>Sort la gomme de la bibliothèque, avec ses propres réglages, tant que la touche reste enfoncée.</dd>
+                <dt>Ctrl + clic + glisser</dt>
+                <dd>Zoom continu : glisser vers la droite pour zoomer, vers la gauche pour dézoomer.</dd>
+                <dt>Ctrl + molette / pincement</dt>
+                <dd>Zoom autour du pointeur.</dd>
+                <dt>Ctrl + Alt + E</dt>
+                <dd>Ouvrir la fenêtre d’export.</dd>
+                <dt>Espace + clic</dt>
+                <dd>Passer en mode main et déplacer librement la vue.</dd>
+                <dt>Ctrl + + / − / 0</dt>
+                <dd>Zoomer, dézoomer, ou revenir à l’ajustement à la fenêtre.</dd>
+            </dl>
+            <div class="shortcut-note">Astuce : un appui simple sur Espace continue de lancer / mettre en pause le média.</div>
+            <div class="form-row">
+                <button id="help-close" class="btn-quiet" style="margin-left:auto;">Fermer</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="status-line">
+        <span id="status">Prêt.</span>
+        <button id="btn-proxies" title="Voir et supprimer les copies de lecture mises en cache">Proxys</button>
+        <button id="btn-shortcuts" title="Afficher les raccourcis clavier">?</button>
+    </div>
+
+    <script src="/static/brushes.js"></script>
+    <script src="/static/remote.js"></script>
+    <script src="/static/transport.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

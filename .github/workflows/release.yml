@@ -1,0 +1,449 @@
+name: Packager les releases
+
+# Se declenche sur un tag "v*.*.*" (release reelle, publiee en brouillon) ou
+# manuellement depuis l'onglet Actions (utile pour tester le build sans
+# creer de release).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      cible:
+        description: "Quoi construire (ignore sur un vrai tag, qui construit toujours tout)"
+        type: choice
+        options: [tout, windows, macos]
+        default: tout
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+# Fichier identique dans live_notes (prive) et live_notes-app (public) : tout
+# comportement qui diverge le fait via `github.repository`, jamais en
+# dupliquant ce fichier.
+#
+# Signature des binaires : abandonnee. Ni Windows (SmartScreen) ni macOS
+# (Gatekeeper) ne proposent de moyen gratuit de supprimer leur avertissement
+# de securite -- SmartScreen se leve avec la reputation du fichier au fil des
+# telechargements (aucun certificat, gratuit ou paye, ne l'evite plus
+# instantanement depuis que Microsoft a retire ce privilege aux certificats
+# EV), et Gatekeeper exige un compte Apple Developer payant (99 $/an) pour la
+# notarisation, sans equivalent gratuit possible. SignPath.io (gratuit pour
+# l'open source) aurait fourni une vraie signature Authenticode Windows mais
+# sans parcours d'inscription simple ; ecarte a ce jour.
+#
+# A la place : attestation de provenance native GitHub (Sigstore, gratuite et
+# illimitee sur un depot public, sans compte externe) sur le depot public
+# uniquement -- ca ne supprime aucun avertissement, ca prouve juste qu'un
+# binaire donne vient bien de ce depot/ce commit/ce workflow.
+jobs:
+  build-windows:
+    if: github.event_name != 'workflow_dispatch' || inputs.cible == 'tout' || inputs.cible == 'windows'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      - name: Installer les dependances
+        run: |
+          pip install -r requirements.txt -r packaging/requirements.txt
+
+      - name: Recuperer FFmpeg (build statique GPL, gyan.dev)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path packaging/vendor/ffmpeg | Out-Null
+          # Miroir tiers, unique et sans garantie de disponibilite : un 503
+          # passager y suffisait a faire echouer tout le build (constate). On
+          # reessaie avec une attente croissante avant de renoncer.
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          $ok = $false
+          foreach ($try in 1..5) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+              $ok = $true
+              break
+            } catch {
+              Write-Host "Tentative $try echouee : $($_.Exception.Message)"
+              if ($try -lt 5) { Start-Sleep -Seconds ($try * 10) }
+            }
+          }
+          if (-not $ok) { Write-Error "FFmpeg introuvable apres 5 tentatives ($url)"; exit 1 }
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extract -Force
+          $bin = Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $bin.FullName packaging/vendor/ffmpeg/ffmpeg.exe
+          # ffprobe analyse les rushs avant de preparer un proxy de lecture
+          # (proxy.py) : sans lui, le mode tablette ne sait plus quoi faire
+          # d'un ProRes ou d'un DNxHD.
+          $probe = Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          Copy-Item $probe.FullName packaging/vendor/ffmpeg/ffprobe.exe
+
+      - name: Generer les icones
+        run: python packaging/make_icon.py
+
+      - name: Build PyInstaller (onedir)
+        run: pyinstaller packaging/live_notes.spec --distpath dist/win --workpath build/win --noconfirm
+
+      # Le build Windows n'avait aucune verification a l'execution, la ou
+      # macOS en a deux. Or les deux pannes les plus couteuses de ce projet
+      # n'existaient *que* dans le binaire compile : le port occupe (page
+      # blanche) et le selecteur de fichier qui relancait l'application. Elles
+      # se voient ici, pas dans les bancs de test.
+      - name: Smoke test (l'exe demarre et sert l'interface)
+        shell: pwsh
+        env:
+          LIVE_NOTES_PORT: "7341"
+          # Sans navigateur a piloter, le lanceur se contente du serveur : la
+          # fenetre Edge n'apporterait rien a ce qu'on verifie ici.
+          LIVE_NOTES_HOST: "127.0.0.1"
+        run: |
+          $app = Start-Process -FilePath dist/win/live_notes/live_notes.exe -PassThru
+          # Sondage serre des le depart : le serveur repond avant que le
+          # lanceur n'ouvre la fenetre (il l'attend, cf. _wait_for_server).
+          # Sur un runner sans session graphique utilisable, cette fenetre
+          # peut se refermer aussitot et emporter le processus -- ce qui ne
+          # dit rien de ce qu'on verifie ici, mais ferait echouer un sondage
+          # trop lent.
+          $ok = $false
+          foreach ($i in 1..120) {
+            try {
+              Invoke-WebRequest -Uri "http://127.0.0.1:$env:LIVE_NOTES_PORT/" -UseBasicParsing -TimeoutSec 2 | Out-Null
+              $ok = $true
+              break
+            } catch { }
+            if ($app.HasExited -and $i -gt 10) { break }
+            Start-Sleep -Milliseconds 500
+          }
+          $died = $app.HasExited
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          Get-Process live_notes -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $ok) {
+            if ($died) {
+              Write-Error "L'application compilee s'est arretee sans jamais servir l'interface."
+            } else {
+              Write-Error "L'application tourne mais ne sert rien sur le port $env:LIVE_NOTES_PORT : c'est l'ecran blanc que voit l'utilisateur.ice."
+            }
+            exit 1
+          }
+          Write-Host "Interface servie sur le port $env:LIVE_NOTES_PORT."
+
+      # Le bug le plus couteux du projet : `[sys.executable, "-c", <code>]`
+      # une fois fige relance l'application au lieu d'ouvrir un selecteur.
+      # Verifie ici sans ecran : lance avec le drapeau, l'application doit
+      # rendre la main *sans* avoir demarre de serveur.
+      - name: Le drapeau selecteur ne demarre pas un second serveur
+        shell: pwsh
+        env:
+          LIVE_NOTES_PORT: "7351"
+        run: |
+          $app = Start-Process -FilePath dist/win/live_notes/live_notes.exe `
+                               -ArgumentList '--live-notes-pick','file','','out.txt' -PassThru
+          # Large de quoi laisser Flask se lier s'il devait le faire : c'est
+          # precisement ce qu'on ne veut pas voir.
+          Start-Sleep -Seconds 12
+          $served = $false
+          try {
+            Invoke-WebRequest -Uri "http://127.0.0.1:$env:LIVE_NOTES_PORT/" -UseBasicParsing -TimeoutSec 3 | Out-Null
+            $served = $true
+          } catch { }
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          Get-Process live_notes -ErrorAction SilentlyContinue | Stop-Process -Force
+          if ($served) {
+            Write-Error "Le drapeau selecteur a demarre une seconde instance de l'application."
+            exit 1
+          }
+          Write-Host "Drapeau intercepte : aucune seconde instance."
+
+      # Inno Setup etait preinstalle sur l'image windows-2022 mais ne l'est
+      # plus sur windows-2025 (= windows-latest actuel), d'ou l'installation
+      # explicite plutot qu'un appel direct a ISCC.
+      - name: Installer Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Construire l'installateur
+        shell: pwsh
+        env:
+          LIVE_NOTES_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0-dev' }}
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging/installer.iss
+
+      # Seul l'installateur est livre : le dossier portable etait zippe ici
+      # puis re-zippe par GitHub au telechargement de l'artefact (zip dans
+      # un zip). L'installateur produit le meme dossier, proprement.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live_notes-windows-x64
+          path: dist/installer/*.exe
+
+  # Deux architectures : les Mac Apple Silicon et les Mac Intel ne peuvent
+  # pas executer le meme binaire, et PyInstaller ne produit que pour
+  # l'architecture de la machine qui compile. D'ou un runner par cible
+  # plutot qu'une compilation croisee (qui exigerait un Python et des
+  # roues universal2 pour toutes les dependances).
+  build-macos:
+    if: github.event_name != 'workflow_dispatch' || inputs.cible == 'tout' || inputs.cible == 'macos'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64          # Apple Silicon (M1 et suivants)
+            runner: macos-latest
+            ffmpeg_arch: arm64
+            bin_arch: arm64      # ce que `lipo -archs` doit afficher
+            requirements: requirements.txt
+          - arch: x64            # Mac Intel
+            runner: macos-15-intel  # dernier runner GitHub sur processeur Intel avant l'arret de x86_64 fin 2027
+            ffmpeg_arch: amd64
+            bin_arch: x86_64
+            # numpy>=2 lie desormais son BLAS via de nouveaux symboles Accelerate
+            # (ex. _cblas_caxpy$NEWLAPACK$ILP64) absents sur les Mac Intel plus
+            # anciens (constate sur Monterey 12.7.6) : import crash au lancement,
+            # rien a la compilation ni au smoke test CI (qui tourne sur un Mac
+            # Intel recent). D'ou un requirements dedie qui epingle numpy<2 pour
+            # ce runner uniquement.
+            requirements: packaging/requirements-macos-x64.txt
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      - name: Installer les dependances
+        run: pip install -r ${{ matrix.requirements }} -r packaging/requirements.txt
+
+      - name: Recuperer FFmpeg (build statique ${{ matrix.ffmpeg_arch }}, martin-riedl.de)
+        run: |
+          mkdir -p packaging/vendor/ffmpeg
+          # `--retry` couvre les erreurs transitoires du miroir (503, coupure) :
+          # sans lui, un incident passager chez l'hebergeur fait echouer le build.
+          curl -L --retry 5 --retry-delay 10 --retry-all-errors -o ffmpeg.zip "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.ffmpeg_arch }}/release/ffmpeg.zip"
+          unzip -o ffmpeg.zip -d ffmpeg_extract
+          find ffmpeg_extract -name ffmpeg -type f -exec cp {} packaging/vendor/ffmpeg/ffmpeg \;
+          chmod +x packaging/vendor/ffmpeg/ffmpeg
+          # ffprobe analyse les rushs avant de preparer un proxy de lecture
+          # (proxy.py) : sans lui, le mode tablette ne sait plus quoi faire
+          # d'un ProRes ou d'un DNxHD. Archive separee chez ce fournisseur.
+          curl -L --retry 5 --retry-delay 10 --retry-all-errors -o ffprobe.zip "https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.ffmpeg_arch }}/release/ffprobe.zip"
+          unzip -o ffprobe.zip -d ffprobe_extract
+          find ffprobe_extract -name ffprobe -type f -exec cp {} packaging/vendor/ffmpeg/ffprobe \;
+          chmod +x packaging/vendor/ffmpeg/ffprobe
+
+      - name: Generer les icones
+        run: python packaging/make_icon.py
+
+      - name: Build PyInstaller (.app)
+        run: pyinstaller packaging/live_notes.spec --distpath dist/mac --workpath build/mac --noconfirm
+
+      # Un binaire compile pour la mauvaise architecture ne donne aucune
+      # erreur ici : il echoue chez l'utilisateur.ice, au lancement, par un
+      # laconique « impossible d'ouvrir l'app car elle n'est pas prise en
+      # charge par ce Mac ». On verifie donc explicitement, y compris pour
+      # FFmpeg — rien n'empeche de telecharger la mauvaise archive.
+      - name: Verifier l'architecture des binaires
+        run: |
+          EXPECTED="${{ matrix.bin_arch }}"
+          # pdfium vient d'une roue PyPI et non d'une archive telechargee ici :
+          # rien ne garantit que pip ait resolu la bonne architecture sur le
+          # runner Intel, et l'erreur ne se verrait qu'a l'ouverture d'un PDF.
+          PDFIUM=$(find dist/mac/live_notes.app -name 'libpdfium*.dylib' | head -1)
+          if [ -z "$PDFIUM" ]; then
+            echo "ERREUR : pdfium absent du bundle — les PDF ne s'ouvriraient pas."
+            exit 1
+          fi
+          for BIN in \
+            dist/mac/live_notes.app/Contents/MacOS/live_notes \
+            dist/mac/live_notes.app/Contents/Frameworks/ffmpeg \
+            dist/mac/live_notes.app/Contents/Frameworks/ffprobe \
+            "$PDFIUM"
+          do
+            GOT=$(lipo -archs "$BIN")
+            echo "$BIN : $GOT"
+            case " $GOT " in
+              *" $EXPECTED "*) ;;
+              *)
+                echo "ERREUR : attendu $EXPECTED, obtenu $GOT"
+                exit 1
+                ;;
+            esac
+          done
+
+      # Signature ad-hoc (identite "-") : uniquement sur le depot public.
+      # Gratuite et immediate, sans compte Apple Developer -- mais ce n'est
+      # pas une signature Developer ID : Gatekeeper affichera quand meme
+      # "developpeur non identifie" a l'ouverture. Objectif ici : que le
+      # binaire soit au moins signe (integrite verifiable), pas la
+      # notarisation complete, qui exigerait un compte payant.
+      - name: Signer l'application (ad-hoc)
+        if: github.repository == 'GanTiz/live_notes-app'
+        run: |
+          codesign --force --deep --sign - "dist/mac/live_notes.app"
+          codesign --verify --deep --strict "dist/mac/live_notes.app"
+
+      # Le runner n'a pas d'ecran : ce test verifie que l'app demarre, que
+      # les chemins figes resolvent et que FFmpeg embarque est trouve — pas
+      # que la fenetre WKWebView s'affiche correctement (a valider une fois
+      # a la main sur un vrai Mac avant une release publique).
+      - name: Smoke test (l'app demarre et sert l'interface)
+        # Port fixe : le defaut de l'application peut se decaler s'il est
+        # occupe (voir app.choose_port), le test doit savoir ou frapper.
+        env:
+          LIVE_NOTES_PORT: "7341"
+        run: |
+          ./dist/mac/live_notes.app/Contents/MacOS/live_notes > smoke.log 2>&1 &
+          APP_PID=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:$LIVE_NOTES_PORT/ > /dev/null 2>&1; then
+              echo "Serveur joignable."
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:$LIVE_NOTES_PORT/ > /dev/null
+
+          # Le mode tablette n'a pas besoin de la boucle locale mais de
+          # l'adresse reseau : c'est par elle que la tablette scanne le QR code
+          # et rejoint la session. Ce que verifie ce test, c'est la moitie qui
+          # depend de l'application -- ecouter sur 0.0.0.0 et repondre sur
+          # l'interface reelle. L'autre moitie est le pare-feu de macOS, qui
+          # est desactive sur ce runner comme il l'est par defaut sur macOS :
+          # il ne se teste pas ici, et il ne se contourne pas depuis le code
+          # (c'est une autorisation par application, accordee par l'humain).
+          LAN=$(python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('198.51.100.1', 53)); print(s.getsockname()[0]); s.close()")
+          echo "Adresse reseau du runner : $LAN"
+          if ! curl -fsS --max-time 5 "http://$LAN:$LIVE_NOTES_PORT/" > /dev/null; then
+            echo "ERREUR : injoignable sur l'adresse reseau — une tablette ne pourrait pas rejoindre."
+            cat smoke.log
+            exit 1
+          fi
+          echo "Joignable sur $LAN : le mode tablette a bien une route."
+
+          echo "--- FFmpeg embarque ---"
+          # Emplacement non suppose : PyInstaller place les binaires dans
+          # Contents/Frameworks ou Contents/Resources selon les versions,
+          # avec des liens symboliques entre les deux. On cherche, on
+          # affiche ce qu'on trouve, et on echoue explicitement sinon —
+          # un `test -x` seul ne dit rien quand il reussit.
+          find dist/mac/live_notes.app -name ffmpeg
+          # Ce qui compte n'est pas qu'un ffmpeg existe quelque part dans le
+          # bundle, mais qu'il soit la ou packaging/launcher.py le cherche :
+          # paths.resource_dir() (= sys._MEIPASS), soit Contents/Frameworks
+          # pour un .app PyInstaller 6. Un binaire uniquement dans
+          # Contents/Resources passerait un `find` tout en etant introuvable
+          # a l'execution, et l'export echouerait chez l'utilisateur.ice.
+          for NAME in ffmpeg ffprobe; do
+            MEIPASS_BIN="dist/mac/live_notes.app/Contents/Frameworks/$NAME"
+            if [ ! -x "$MEIPASS_BIN" ]; then
+              echo "ERREUR : pas de $NAME executable dans Contents/Frameworks"
+              echo "(= sys._MEIPASS, seul emplacement que le lanceur consulte)"
+              cat smoke.log
+              exit 1
+            fi
+            echo "Trouve la ou le lanceur le cherche : $MEIPASS_BIN"
+            "$MEIPASS_BIN" -version | head -n 1
+          done
+          echo "--- journal de demarrage ---"
+          cat smoke.log
+          kill $APP_PID 2>/dev/null || true
+
+      # srcfolder pointe vers un dossier de mise en scene (pas directement
+      # vers le .app) pour pouvoir y glisser aussi un raccourci /Applications :
+      # sans lui, l'utilisateur.ice ne voit que l'icone de l'app dans le .dmg,
+      # sans endroit ou la glisser-deposer.
+      - name: Creer le .dmg (non signe)
+        run: |
+          mkdir -p dist/dmg-staging
+          cp -R "dist/mac/live_notes.app" dist/dmg-staging/
+          ln -s /Applications dist/dmg-staging/Applications
+
+          # Taille imposee, et non deduite par hdiutil.
+          #
+          # Avec `-srcfolder` seul, hdiutil dimensionne l'image en parcourant le
+          # dossier -- et le raccourci vers /Applications l'entraine dans toute
+          # la bibliotheque d'applications du runner, dont il additionne le
+          # poids. Sur le runner Intel, largement fourni en Xcode et consorts,
+          # l'image reclamee depassait le disque : « hdiutil: create failed - No
+          # space left on device », alors que le bundle pese moins de 200 Mo. Le
+          # runner arm64, bien moins charge, passait -- d'ou un echec qui ne
+          # frappait qu'une architecture sur deux.
+          BUNDLE_MB=$(( $(du -sk "dist/mac/live_notes.app" | cut -f1) / 1024 ))
+          IMAGE_MB=$(( BUNDLE_MB * 3 / 2 + 100 ))
+          echo "Bundle : ${BUNDLE_MB} Mo — image demandee : ${IMAGE_MB} Mo"
+          df -h / | tail -1
+          hdiutil create -volname "live_notes" -srcfolder dist/dmg-staging -ov \
+            -format UDZO -size "${IMAGE_MB}m" live_notes-macos-${{ matrix.arch }}.dmg
+          ls -lh live_notes-macos-${{ matrix.arch }}.dmg
+
+      # Le smoke test precedent lance le .app depuis dist/, pas depuis le
+      # .dmg livre : il ne dirait rien d'une image disque corrompue ou d'un
+      # bundle incomplet apres empaquetage. Ici on monte l'image telle que
+      # l'utilisateur.ice la recevra et on relance l'app depuis le volume.
+      - name: Verifier le .dmg (montage et lancement depuis l'image)
+        env:
+          LIVE_NOTES_PORT: "7341"
+        run: |
+          hdiutil verify live_notes-macos-${{ matrix.arch }}.dmg
+          MOUNT_DIR=$(mktemp -d)
+          hdiutil attach live_notes-macos-${{ matrix.arch }}.dmg -mountpoint "$MOUNT_DIR" -nobrowse -readonly
+          ls -la "$MOUNT_DIR"
+          "$MOUNT_DIR/live_notes.app/Contents/MacOS/live_notes" > dmg_smoke.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:$LIVE_NOTES_PORT/ > /dev/null 2>&1; then
+              echo "App lancee depuis le .dmg : serveur joignable."
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:$LIVE_NOTES_PORT/ > /dev/null
+          cat dmg_smoke.log
+          pkill -f "live_notes" 2>/dev/null || true
+          sleep 2
+          hdiutil detach "$MOUNT_DIR"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live_notes-macos-${{ matrix.arch }}
+          path: live_notes-macos-${{ matrix.arch }}.dmg
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Ne remplace aucune signature Authenticode/Developer ID (abandonnees,
+      # voir le commentaire en tete de fichier) : preuve de provenance
+      # verifiable (`gh attestation verify <fichier> -R GanTiz/live_notes-app`),
+      # pas une signature reconnue par SmartScreen ou Gatekeeper.
+      - name: Attester la provenance des builds (GitHub, gratuit)
+        if: github.repository == 'GanTiz/live_notes-app'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            artifacts/live_notes-windows-x64/*.exe
+            artifacts/live_notes-macos-arm64/*.dmg
+            artifacts/live_notes-macos-x64/*.dmg
+
+      - name: Publier une release en brouillon
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            artifacts/live_notes-windows-x64/*.exe
+            artifacts/live_notes-macos-arm64/*.dmg
+            artifacts/live_notes-macos-x64/*.dmg
