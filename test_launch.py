@@ -172,8 +172,8 @@ def test_the_frozen_picker_never_relaunches_the_application_blind():
 def test_the_flag_is_intercepted_before_anything_starts():
     intercepted = []
 
-    def fake_dialog(kind, initial):
-        intercepted.append((kind, initial))
+    def fake_dialog(kind, initial, default_name=""):
+        intercepted.append((kind, initial, default_name))
         return "/rushes/plan.mov"
 
     outfile = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pick_test")
@@ -193,7 +193,7 @@ def test_the_flag_is_intercepted_before_anything_starts():
         nativedialog._tk_dialog = real
         if os.path.exists(outfile):
             os.unlink(outfile)
-    assert intercepted == [("file", "")], intercepted
+    assert intercepted == [("file", "", "")], intercepted
     return "detourne, et le chemin ressort par fichier"
 
 
@@ -208,10 +208,11 @@ def test_an_ordinary_launch_is_left_alone():
 def test_the_result_never_travels_through_stdout():
     # Le binaire est construit avec console=False : une application Windows
     # sans console n'a pas de sortie standard. Le chemin doit passer par un
-    # fichier, et le fichier doit figurer dans la commande.
+    # fichier, et le fichier doit figurer dans la commande. La derniere
+    # position est le nom propose (vide ici, pour un dossier).
     with frozen():
         command = nativedialog._tk_command("directory", "/exports", "/tmp/sortie.txt")
-    assert command[-1] == "/tmp/sortie.txt", command
+    assert command[-2] == "/tmp/sortie.txt", command
     assert "/exports" in command, command
     return "chemin de sortie transmis en argument"
 
@@ -237,7 +238,7 @@ def _backends_for(platform):
         os.name = "nt" if platform == "win32" else "posix"
 
         def spy(backend):
-            def run(kind, initial):
+            def run(kind, initial, default_name=""):
                 tried.append(backend)
                 raise nativedialog.PickerError("essai")
             return run
@@ -259,6 +260,55 @@ def _backends_for(platform):
 
 
 # --------------------------------------------------------------------------
+# macOS minimal pris en charge
+# --------------------------------------------------------------------------
+
+def test_macos_version_is_parsed_as_major_minor():
+    cases = {"15.3.1": (15, 3), "13.5": (13, 5), "12": (12, 0),
+             "10.15.7": (10, 15)}
+    for raw, expected in cases.items():
+        assert nativedialog._parse_macos_version(raw) == expected, raw
+    return "versions macOS parsees en (majeur, mineur)"
+
+
+def test_an_unreadable_macos_version_is_not_blocking():
+    for raw in ("", "abcd", "12.x"):
+        assert nativedialog._parse_macos_version(raw) is None, raw
+    return "version illisible laissee passer"
+
+
+def test_macos_11_and_newer_are_accepted():
+    real = nativedialog.macos_version
+    try:
+        for version in ((11, 0), (12, 3), (15, 3)):
+            nativedialog.macos_version = lambda: version
+            assert nativedialog.refuse_unsupported_macos() is None, version
+    finally:
+        nativedialog.macos_version = real
+    return "macOS 11 accepte sans refus"
+
+
+def test_macos_below_11_is_refused():
+    seen = []
+    real_version = nativedialog.macos_version
+    real_run = nativedialog._run
+    nativedialog.macos_version = lambda: (10, 15)
+    nativedialog._run = lambda *args, **kwargs: seen.append(args)
+    try:
+        try:
+            nativedialog.refuse_unsupported_macos()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("un macOS 10 aurait du etre refuse")
+    finally:
+        nativedialog.macos_version = real_version
+        nativedialog._run = real_run
+    assert seen and "osascript" in seen[0][0], seen
+    return "macOS 10 refuse, avec alerte osascript"
+
+
+# --------------------------------------------------------------------------
 # Dossier initial du selecteur de media, et sa memoire
 # --------------------------------------------------------------------------
 
@@ -269,7 +319,7 @@ def test_the_initial_directory_reaches_the_backend():
     seen = []
     original = nativedialog._ask_tk
 
-    def fake(kind, initial):
+    def fake(kind, initial, default_name=""):
         seen.append((kind, initial))
         return "/rushes/plan.mov"
 
@@ -281,6 +331,40 @@ def test_the_initial_directory_reaches_the_backend():
     assert seen == [("file", "/dossier/de/depart")], seen
     assert result == "/rushes/plan.mov", result
     return "dossier de depart transmis jusqu'au backend"
+
+
+def test_ask_save_path_carries_kind_and_suggested_name():
+    # Le dialogue d'enregistrement du projet (voir app.py, /api/project/save)
+    # doit remonter jusqu'au backend le type « save » et le nom propose. Tous
+    # les backends sont remplaces : la plateforme ne change pas le verdict.
+    seen = []
+    originals = {name: getattr(nativedialog, name)
+                 for name in ("_ask_macos", "_ask_windows", "_ask_tk")}
+    for name in originals:
+        setattr(nativedialog, name,
+                lambda kind, initial, default_name="", _seen=seen:
+                _seen.append((kind, initial, default_name))
+                or "/exports/mon_projet.lvn")
+    try:
+        result = nativedialog.ask_save_path("/exports", "mon_projet.lvn")
+    finally:
+        for name, backend in originals.items():
+            setattr(nativedialog, name, backend)
+    assert seen[0] == ("save", "/exports", "mon_projet.lvn"), seen
+    assert result == "/exports/mon_projet.lvn", result
+    return "type save et nom suggere portes jusqu'au backend"
+
+
+def test_the_save_command_carries_the_suggested_name():
+    # Le repli Tk tourne en sous-processus : le nom propose doit y figurer,
+    # comme le dossier de depart et le fichier de sortie. Positions de la
+    # commande : [python, module, PICK_FLAG, kind, initial, outfile, nom].
+    command = nativedialog._tk_command("save", "/exports", "/tmp/sortie.txt",
+                                       "mon_projet.lvn")
+    assert command[3] == "save", command
+    assert command[-2] == "/tmp/sortie.txt", command
+    assert command[-1] == "mon_projet.lvn", command
+    return "nom propose transmis au sous-processus Tk"
 
 
 def test_last_media_directory_persists_and_forgets_what_vanished():
@@ -348,7 +432,13 @@ TESTS = [
     test_an_ordinary_launch_is_left_alone,
     test_the_result_never_travels_through_stdout,
     test_each_platform_has_a_native_first_choice,
+    test_macos_version_is_parsed_as_major_minor,
+    test_an_unreadable_macos_version_is_not_blocking,
+    test_macos_11_and_newer_are_accepted,
+    test_macos_below_11_is_refused,
     test_the_initial_directory_reaches_the_backend,
+    test_ask_save_path_carries_kind_and_suggested_name,
+    test_the_save_command_carries_the_suggested_name,
     test_last_media_directory_persists_and_forgets_what_vanished,
     test_the_media_picker_falls_back_to_the_videos_library,
     test_the_media_picker_remembers_the_last_directory,

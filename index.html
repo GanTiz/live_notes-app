@@ -1910,6 +1910,24 @@
         </div>
     </div>
 
+    <!-- ----------------------------- Saisie d'un nom (modale interne) ---- -->
+    <!-- `window.prompt` n'existe pas dans WKWebView (fenetre macOS) : il
+         renvoie falsy et la sauvegarde de preset echouait sans un mot. On
+         demande donc le nom dans une modale de l'application, identique sur
+         toutes les fenetres (Chrome Windows, WKWebView macOS, navigateur). -->
+    <div id="prompt-screen" class="modal" style="display:none;">
+        <div class="modal-box">
+            <h2 id="prompt-title">Nom</h2>
+            <div class="form-group">
+                <input type="text" id="prompt-input" autocomplete="off">
+            </div>
+            <div class="form-row">
+                <button id="prompt-cancel" class="btn-quiet" style="flex:1;">Annuler</button>
+                <button id="prompt-ok" class="btn-strong" style="flex:1;">OK</button>
+            </div>
+        </div>
+    </div>
+
     <!-- ----------------------------------------------------------- Barre -->
     <div class="toolbar">
         <div class="toolbar-group grow">

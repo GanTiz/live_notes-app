@@ -976,6 +976,40 @@ def api_browse():
     return jsonify({"directory": directory})
 
 
+@app.route("/api/project/save", methods=["POST"])
+@pc_only
+def api_project_save():
+    """Sauvegarde du projet via un dialogue d'enregistrement natif.
+
+    Cote client, un `<a download>` sur un blob ne marche qu'avec Chrome :
+    WKWebView (le build macOS) ignore l'attribut `download` et navigue vers
+    le blob, remplacant l'ecran de l'application par le JSON. Comme pour le
+    choix du media et du dossier d'export, on passe donc par une boite de
+    dialogue native ; le chemin final vient d'elle, jamais du client -- un
+    `<input type=file>` ne donnerait de toute facon qu'un blob, et le serveur
+    ne doit jamais accepter un chemin venu de la page.
+    """
+    payload = request.get_json(silent=True) or {}
+    content = payload.get("content")
+    if not isinstance(content, str) or not content:
+        return jsonify({"error": "Contenu de projet manquant."}), 400
+    suggested = os.path.basename(str(payload.get("name") or "live_notes.lvn"))
+    if not suggested.lower().endswith(".lvn"):
+        suggested += ".lvn"
+    try:
+        path = nativedialog.ask_save_path(EXPORT_DIR, suggested)
+    except (nativedialog.PickerError, OSError, subprocess.SubprocessError) as exc:
+        return jsonify({"error": "Dialogue d'enregistrement indisponible (%s)." % exc}), 500
+    if not path:
+        return jsonify({"cancelled": True})
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except OSError as exc:
+        return jsonify({"error": "Ecriture du projet impossible (%s)." % exc}), 500
+    return jsonify({"path": path})
+
+
 def _export_media(payload):
     """Le media de fond tel que l'export doit le voir, ou None.
 

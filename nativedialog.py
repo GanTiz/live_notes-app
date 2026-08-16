@@ -1,4 +1,4 @@
-"""Boites de dialogue natives « choisir un fichier / un dossier ».
+"""Boites de dialogue natives « choisir un fichier / un dossier / enregistrer ».
 
 Un `<input type=file>` ne donne au navigateur qu'un blob anonyme : Python n'a
 jamais le chemin du fichier, donc rien a transcoder ni a rendre. Le detour par
@@ -70,6 +70,66 @@ def _run(command, **extra):
 
 
 # --------------------------------------------------------------------------
+# macOS minimal pris en charge
+# --------------------------------------------------------------------------
+
+# Le bundle est construit pour macOS 11+ (numpy<2 et pypdfium2<=5.9.0, roues
+# OpenBLAS — voir packaging/requirements-macos.txt) : sous ce seuil, l'import
+# numpy crashait au lancement sans aucune explication pour l'utilisateur.ice.
+# Mieux vaut un refus explicite, en toutes lettres, qu'un echec muet. macOS
+# 10.13+ peut fonctionner mais n'est ni teste ni garanti.
+MIN_MACOS = (11, 0)
+
+
+def _parse_macos_version(version_str):
+    """`"13.5.1"` -> (13, 5) ; `"10.15"` -> (10, 15) ; illisible -> None."""
+    if not version_str:
+        return None
+    parts = version_str.split(".")
+    if not parts or not parts[0].isdigit():
+        return None
+    major = int(parts[0])
+    minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    return (major, minor)
+
+
+def macos_version():
+    """Version de macOS sous forme (majeur, mineur), None hors macOS ou si
+    elle ne se lit pas. `platform.mac_ver()` renseigne le vrai systeme, meme
+    une fois l'application figee par PyInstaller."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import platform
+        return _parse_macos_version(platform.mac_ver()[0])
+    except Exception:
+        return None
+
+
+def refuse_unsupported_macos():
+    """Refuse de demarrer sur un macOS anterieur a MIN_MACOS.
+
+    A appeler en tete du lanceur, avant d'importer l'application : l'import
+    numpy crashait sans message sur ces systemes. Une version illisible est
+    laissee passer — on ne refuse que ce qu'on sait trop ancien.
+    """
+    version = macos_version()
+    if version is None or version >= MIN_MACOS:
+        return
+    message = ("live_notes necessite macOS %d (Big Sur) ou plus recent. "
+               "Votre version (macOS %s) n'est pas prise en charge."
+               % (MIN_MACOS[0], ".".join(str(v) for v in version)))
+    try:
+        _run(["osascript", "-e",
+              'display alert "live_notes" message "%s"'
+              % message.replace('"', '\\"')])
+    except Exception:
+        # Une alerte qui ne part pas ne change rien au verdict : on refuse.
+        pass
+    sys.exit(1)
+
+
+# --------------------------------------------------------------------------
 # macOS — osascript
 # --------------------------------------------------------------------------
 
@@ -118,9 +178,36 @@ end run
 '''
 
 
-def _ask_macos(kind, initial):
-    script = _OSASCRIPT_DIR if kind == "directory" else _OSASCRIPT_FILE
-    command = ["osascript", "-e", script, initial or ""]
+_OSASCRIPT_SAVE = '''
+on run argv
+    set defaultName to item 1 of argv
+    set startHere to item 2 of argv
+    try
+        if startHere is not "" then
+            try
+                set chosen to choose file name with prompt "Enregistrer le projet" default name defaultName default location (POSIX file startHere as alias)
+            on error
+                set chosen to choose file name with prompt "Enregistrer le projet" default name defaultName
+            end try
+        else
+            set chosen to choose file name with prompt "Enregistrer le projet" default name defaultName
+        end if
+        return POSIX path of chosen
+    on error number -128
+        return ""
+    end try
+end run
+'''
+
+
+def _ask_macos(kind, initial, default_name=""):
+    if kind == "directory":
+        script, arguments = _OSASCRIPT_DIR, [initial or ""]
+    elif kind == "save":
+        script, arguments = _OSASCRIPT_SAVE, [default_name or "", initial or ""]
+    else:
+        script, arguments = _OSASCRIPT_FILE, [initial or ""]
+    command = ["osascript", "-e", script] + arguments
     completed = _run(command)
     if completed.returncode != 0:
         raise PickerError((completed.stderr or "osascript a echoue").strip())
@@ -225,8 +312,35 @@ $owner.Dispose()
 '''
 
 
-def _ask_windows(kind, initial):
-    script = _POWERSHELL_DIR if kind == "directory" else _POWERSHELL_FILE
+_POWERSHELL_SAVE = r'''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+''' + _POWERSHELL_OWNER + r'''
+$dialog = New-Object System.Windows.Forms.SaveFileDialog
+$dialog.Title = 'Enregistrer le projet'
+$dialog.Filter = 'Projet live_notes (*.lvn)|*.lvn|Tous les fichiers (*.*)|*.*'
+$dialog.DefaultExt = 'lvn'
+$dialog.AddExtension = $true
+$dialog.FileName = $env:LIVE_NOTES_PICK_NAME
+if ($env:LIVE_NOTES_PICK_INITIAL -and (Test-Path -LiteralPath $env:LIVE_NOTES_PICK_INITIAL)) {
+    $dialog.InitialDirectory = $env:LIVE_NOTES_PICK_INITIAL
+}
+$result = ''
+if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+    $result = $dialog.FileName
+}
+[System.IO.File]::WriteAllText($env:LIVE_NOTES_PICK_OUTPUT, $result, (New-Object System.Text.UTF8Encoding($false)))
+$owner.Dispose()
+'''
+
+
+def _ask_windows(kind, initial, default_name=""):
+    if kind == "directory":
+        script = _POWERSHELL_DIR
+    elif kind == "save":
+        script = _POWERSHELL_SAVE
+    else:
+        script = _POWERSHELL_FILE
     handle, outfile = tempfile.mkstemp(prefix="live_notes_pick_", suffix=".txt")
     os.close(handle)
     try:
@@ -239,6 +353,8 @@ def _ask_windows(kind, initial):
         # en tout autre chose (une virgule, observe en usage reel).
         environment = dict(os.environ, LIVE_NOTES_PICK_INITIAL=initial or "",
                            LIVE_NOTES_PICK_OUTPUT=outfile)
+        if kind == "save":
+            environment["LIVE_NOTES_PICK_NAME"] = default_name or ""
         completed = _run(
             ["powershell", "-NoProfile", "-NonInteractive", "-STA",
              "-ExecutionPolicy", "Bypass", "-Command", script],
@@ -262,8 +378,8 @@ def _ask_windows(kind, initial):
 # Repli — Tk dans un sous-processus
 # --------------------------------------------------------------------------
 
-def _tk_command(kind, initial, outfile):
-    arguments = [PICK_FLAG, kind, initial or "", outfile]
+def _tk_command(kind, initial, outfile, default_name=""):
+    arguments = [PICK_FLAG, kind, initial or "", outfile, default_name or ""]
     if getattr(sys, "frozen", False):
         # Fige : re-executer l'application, que `run_picker_if_requested`
         # detourne avant qu'elle ne demarre un serveur.
@@ -271,11 +387,11 @@ def _tk_command(kind, initial, outfile):
     return [sys.executable, os.path.abspath(__file__)] + arguments
 
 
-def _ask_tk(kind, initial):
+def _ask_tk(kind, initial, default_name=""):
     handle, outfile = tempfile.mkstemp(prefix="live_notes_pick_", suffix=".txt")
     os.close(handle)
     try:
-        completed = _run(_tk_command(kind, initial, outfile))
+        completed = _run(_tk_command(kind, initial, outfile, default_name))
         if completed.returncode != 0:
             raise PickerError((completed.stderr or "Tk a echoue").strip())
         with open(outfile, encoding="utf-8") as result:
@@ -287,7 +403,7 @@ def _ask_tk(kind, initial):
             pass
 
 
-def _tk_dialog(kind, initial):
+def _tk_dialog(kind, initial, default_name=""):
     """Ouvre reellement la boite Tk. Ne tourne que dans le sous-processus."""
     import tkinter as tk
     from tkinter import filedialog
@@ -299,6 +415,10 @@ def _tk_dialog(kind, initial):
         if kind == "directory":
             return filedialog.askdirectory(title="Dossier de destination",
                                            initialdir=initial or None) or ""
+        if kind == "save":
+            return filedialog.asksaveasfilename(title="Enregistrer le projet",
+                                                initialdir=initial or None,
+                                                initialfile=default_name or None) or ""
         return filedialog.askopenfilename(title="Choisir un media",
                                           initialdir=initial or None) or ""
     finally:
@@ -319,8 +439,9 @@ def run_picker_if_requested(argv=None):
     kind = argv[2] if len(argv) > 2 else "file"
     initial = argv[3] if len(argv) > 3 else ""
     outfile = argv[4] if len(argv) > 4 else ""
+    default_name = argv[5] if len(argv) > 5 else ""
     try:
-        path = _tk_dialog(kind, initial)
+        path = _tk_dialog(kind, initial, default_name)
     except Exception:
         # Le code de sortie porte l'echec : ecrire une trace sur une sortie
         # standard qui n'existe pas (console=False) ne menerait nulle part.
@@ -335,7 +456,7 @@ def run_picker_if_requested(argv=None):
 # Interface publique
 # --------------------------------------------------------------------------
 
-def _ask(kind, initial=""):
+def _ask(kind, initial="", default_name=""):
     if sys.platform == "darwin":
         backends = (_ask_macos, _ask_tk)
     elif os.name == "nt":
@@ -346,7 +467,7 @@ def _ask(kind, initial=""):
     failure = None
     for backend in backends:
         try:
-            return backend(kind, initial)
+            return backend(kind, initial, default_name=default_name)
         except (PickerError, OSError, subprocess.SubprocessError) as exc:
             failure = exc
     raise PickerError(failure or "aucun selecteur disponible")
@@ -364,6 +485,12 @@ def ask_open_file(initial=""):
 def ask_directory(initial=""):
     """Chemin du dossier choisi, ou "" si l'utilisateur.ice a annule."""
     return _ask("directory", initial)
+
+
+def ask_save_path(initial="", default_name=""):
+    """Chemin complet du fichier a enregistrer, ou "" si l'utilisateur.ice a
+    annule. `default_name` est le nom propose dans le dialogue."""
+    return _ask("save", initial, default_name)
 
 
 if __name__ == "__main__":

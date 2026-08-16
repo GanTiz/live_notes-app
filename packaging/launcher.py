@@ -40,6 +40,11 @@ if not getattr(sys, "frozen", False):
 import nativedialog  # noqa: E402
 import paths  # noqa: E402
 
+# Refus explicite d'un macOS trop ancien (macOS < 12), avant d'importer
+# app.py/numpy et avant d'ouvrir quoi que ce soit : sur ces systemes l'import
+# numpy crashait sans message. Un Mac sous le minimum s'arrete ici, proprement.
+nativedialog.refuse_unsupported_macos()
+
 # Avant tout le reste : une application figee re-executee pour ouvrir un
 # selecteur de fichier ne doit surtout pas demarrer un serveur. Cet appel ne
 # rend la main que si la ligne de commande ne demande pas de selecteur (voir

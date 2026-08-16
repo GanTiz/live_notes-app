@@ -19,10 +19,11 @@ Terrain prepare sur la branche `packaging`.
   onefile — voir plus bas pourquoi).
 - `packaging/requirements.txt` — dependances du build desktop uniquement
   (`pywebview`, `pyinstaller`), separees de `requirements.txt`.
-- `packaging/requirements-macos-x64.txt` — memes dependances que
-  `requirements.txt`, mais avec `numpy<2` (voir "numpy sur Mac Intel"
-  ci-dessous). Utilise uniquement par le job `build-macos (x64)` ; l'arm64
-  et Windows restent sur `requirements.txt`.
+- `packaging/requirements-macos.txt` — memes dependances applicatives que
+  `requirements.txt`, mais avec `numpy<2` et `pypdfium2<=5.9.0` (voir
+  "numpy sur macOS" et "pypdfium2 est lui aussi epingle" ci-dessous). Utilise
+  par le job `build-macos` pour les **deux** architectures (arm64 et Intel) ;
+  Windows et le mode serveur restent sur `requirements.txt`.
 - `THIRD_PARTY_LICENSES.md` (racine du depot) — notice GPL pour le binaire
   FFmpeg embarque.
 - `paths.py` (racine du depot) — resolution des chemins, partagee par
@@ -47,9 +48,10 @@ Le job verifie explicitement l'architecture (`lipo -archs`) du lanceur
 archive FFmpeg telechargee pour la mauvaise plateforme, et l'erreur ne
 se manifesterait qu'a l'export, chez l'utilisateur.ice.
 
-## numpy sur Mac Intel : pourquoi `numpy<2` pour ce runner seul
+## numpy sur macOS : pourquoi `numpy<2` (les deux architectures)
 
-Sur un Mac Intel reel (Monterey 12.7.6), le build x64 crashait au lancement :
+Le bundle vise macOS **11+** (Big Sur). Sur un vrai Mac plus ancien, le build
+crashait au lancement :
 
 ```
 ImportError: dlopen(.../numpy/_core/_multiarray_umath...): Symbol not found:
@@ -57,18 +59,50 @@ ImportError: dlopen(.../numpy/_core/_multiarray_umath...): Symbol not found:
 Expected in: /System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate
 ```
 
-`numpy>=2` lie son BLAS via de nouveaux symboles Accelerate qui n'existent
-pas sur cette version de macOS/Xcode. Le smoke test CI ne le voit pas : il
-tourne sur un Mac Intel **recent** (image `macos-15-intel`), qui a les bons
-symboles. Le crash n'apparait que chez l'utilisateur.ice, sur un Mac plus
-ancien — d'ou l'absence d'alerte avant un test manuel reel.
+`numpy>=2` publie des roues macOS `macosx_14_0_arm64/x86_64` qui lient leur
+BLAS via de nouveaux symboles Accelerate absents avant macOS 14. Sur un
+runner macOS 14/15 (le `macos-latest` arm64, et le `macos-15-intel`), pip
+choisit cette roue : le bundle qui en resulte crash chez l'utilisateur.ice
+sur macOS 12/13. Le smoke test CI ne le voit pas, il tourne sur un Mac
+recent qui a les bons symboles — le crash n'apparait que chez l'utilisateur.
+ice, d'ou l'absence d'alerte avant un test manuel reel (constate sur
+Monterey 12.7.6 en Intel, et sur un Apple Silicon sous Ventura 13).
 
-`packaging/requirements-macos-x64.txt` epingle `numpy<2` pour contourner
-ca, uniquement sur ce job : l'arm64 et Windows gardent `numpy>=1.24` (donc
-potentiellement 2.x) via `requirements.txt`. Si une prochaine version de
-numpy 2.x corrige la compatibilite Accelerate sur les anciens macOS, cette
-epingle pourra etre retiree — a re-tester sur un vrai Mac Intel avant de le
-faire, le smoke test CI ne le detecterait pas.
+`packaging/requirements-macos.txt` epingle `numpy<2` pour contourner ca, sur
+les deux builds macOS : la 1.26 (derniere branche 1.x) n'embarque que des
+roues OpenBLAS (`macosx_11_0_arm64` / `macosx_10_9_x86_64`), compatibles du
+macOS 11 au plus recent. Windows et le mode serveur gardent `numpy>=1.24`
+(donc potentiellement 2.x) via `requirements.txt`. Si une prochaine version
+de numpy 2.x corrige la compatibilite Accelerate sur les anciens macOS, cette
+epingle pourra etre retiree — a re-tester sur un vrai Mac 11/12/13 avant de
+le faire, le smoke test CI ne le detecterait pas.
+
+### pypdfium2 est lui aussi epingle (`<=5.9.0`)
+
+Depuis la 5.10, les roues macOS de pypdfium2 exigent macOS 13
+(`macosx_13_0_*`). Sans epingle, le build embarquerait un PDFium qui refuse
+de charger sur un Mac plus ancien — exactement le meme type de bug que numpy,
+et le garde-fou `minos <= 11.0` ci-dessous le bloquerait de toute facon. La
+5.9 est la derniere a publier des roues `macosx_11_0_arm64/x86_64` ;
+l'API utilisee par `pdfdoc.py` (`PdfDocument`, `page.render(scale)`,
+`bitmap.to_pil()`) est stable de la 4.x a la 5.9.
+
+### Deux garde-fous contre une regression silencieuse
+
+1. **Au build** (`release.yml`, job `build-macos`) : une etape passe chaque
+   binaire du bundle (`vtool -show-build`, champ `minos:`) et echoue si un
+   binaire declare un macOS minimal superieur a 11.0. C'est ce qui aurait
+   bloque la v1.0.1, et ca couvre aussi ffmpeg/ffprobe, Pillow, pypdfium2 et
+   pyobjc, pas seulement numpy. Ce test ne remplace pas un lancement sur un
+   vrai macOS 11 : il garantit que les binaires *declarent* la compatibilite,
+   pas que le systeme se comporte pareil partout.
+2. **Au demarrage** (`nativedialog.refuse_unsupported_macos`, appele en tete
+   de `packaging/launcher.py`) : sur un macOS < 11, l'application s'arrete
+   avec une alerte explicite (`osascript`) au lieu de crasher muettement a
+   l'import numpy. Une version macOS illisible est laissee passer. macOS
+   10.13+ peut fonctionner (toutes les roues embarquees le permettent) mais
+   n'est ni teste ni garanti — Apple a arrete ces systemes, aucun runner CI
+   ne peut les verifier, et le WebKit de WKWebView y est ancien.
 
 ## Resolution des chemins une fois le code fige (`paths.py`)
 
@@ -150,6 +184,19 @@ Verifie (CI `workflow_dispatch` + build local Windows + usage reel) :
   le bundle") ; montage du `.dmg` et lancement depuis le volume.
 
 Reste a valider :
+- **macOS 11 en vrai** : aucun runner GitHub n'existe sous macOS 14 (le
+  `macos-13` a ferme le 4 decembre 2025). Le garde-fou `minos <= 11.0` et le
+  smoke test (sur macOS 15) ne garantissent pas le comportement runtime d'un
+  vrai macOS 11. A verifier une fois a la main sur un Mac Big Sur avant une
+  release publique — c'est la que le crash numpy de la v1.0.1 a ete decouvert
+  et que les deux dialogues cotes fenetre (sauvegarde de projet et nom de
+  preset) ont montre leurs defauts.
+- **macOS 10.13+** : potentiellement compatible mais non teste ni garanti
+  (voir la section numpy sur macOS).
+- **Les deux dialogues de la fenetre macOS** : `saveProject` passe desormais
+  par un dialogue natif (`POST /api/project/save`) et le nom de preset par
+  une modale interne (`#prompt-screen`) — `window.prompt` et le `<a download>`
+  ne marchent pas dans WKWebView. A reverifier une fois a la main sur Mac.
 - **Affichage de la fenetre macOS** : le smoke test CI tourne sans ecran,
   il confirme que l'app demarre et sert l'interface mais pas que la
   fenetre `pywebview`/WKWebView s'affiche. A verifier une fois a la main

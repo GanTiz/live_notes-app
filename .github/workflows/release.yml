@@ -193,23 +193,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # numpy>=2 lie son BLAS via de nouveaux symboles Accelerate (ex.
+        # _cblas_caxpy$NEWLAPACK$ILP64) qui n'existent que sur macOS 14+
+        # (constate sur Monterey 12.7.6 en Intel, et sur un Apple Silicon
+        # sous Ventura 13) : sur un runner macOS 14/15, pip choisit la roue
+        # Accelerate "macosx_14_0", et l'import numpy crash au lancement sur
+        # tout Mac plus ancien — rien a la compilation ni au smoke test CI
+        # (qui tourne sur un Mac recent). D'ou un requirements macOS dedie,
+        # partage par les deux architectures, qui epingle numpy<2 : la 1.26
+        # n'embarque que des roues OpenBLAS (macosx_11_0_arm64 /
+        # macosx_10_9_x86_64), compatibles du macOS 11 au plus recent.
         include:
           - arch: arm64          # Apple Silicon (M1 et suivants)
             runner: macos-latest
             ffmpeg_arch: arm64
             bin_arch: arm64      # ce que `lipo -archs` doit afficher
-            requirements: requirements.txt
+            requirements: packaging/requirements-macos.txt
           - arch: x64            # Mac Intel
             runner: macos-15-intel  # dernier runner GitHub sur processeur Intel avant l'arret de x86_64 fin 2027
             ffmpeg_arch: amd64
             bin_arch: x86_64
-            # numpy>=2 lie desormais son BLAS via de nouveaux symboles Accelerate
-            # (ex. _cblas_caxpy$NEWLAPACK$ILP64) absents sur les Mac Intel plus
-            # anciens (constate sur Monterey 12.7.6) : import crash au lancement,
-            # rien a la compilation ni au smoke test CI (qui tourne sur un Mac
-            # Intel recent). D'ou un requirements dedie qui epingle numpy<2 pour
-            # ce runner uniquement.
-            requirements: packaging/requirements-macos-x64.txt
+            requirements: packaging/requirements-macos.txt
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -279,6 +283,36 @@ jobs:
                 ;;
             esac
           done
+
+      # Le crash numpy de la v1.0.1 (roue compilee pour macOS 14, lancee sur
+      # un Mac plus ancien) ne se voyait ni a la compilation ni au smoke test
+      # CI. On verifie donc ici, sur chaque binaire embarque, le macOS minimal
+      # declare (champ `minos:` de `vtool`, Xcode) : s'il depasse 11.0, le
+      # .dmg mentirait sur sa compatibilite. Un binaire sans declaration
+      # (pas de LC_BUILD_VERSION) est laisse passer.
+      - name: Verifier que chaque binaire tourne des macOS 11
+        run: |
+          LIMIT_MAJOR=11
+          LIMIT_MINOR=0
+          FAILED=0
+          for F in $(find dist/mac/live_notes.app -type f); do
+            if file "$F" | grep -q "Mach-O"; then
+              MINOS=$(vtool -show-build "$F" 2>/dev/null | awk '/minos:/{print $2; exit}')
+              if [ -n "$MINOS" ]; then
+                MAJOR=$(echo "$MINOS" | cut -d. -f1)
+                MINOR=$(echo "$MINOS" | cut -d. -f2)
+                MINOR=${MINOR:-0}
+                if [ "$MAJOR" -gt "$LIMIT_MAJOR" ] || \
+                   { [ "$MAJOR" -eq "$LIMIT_MAJOR" ] && [ "$MINOR" -gt "$LIMIT_MINOR" ]; }; then
+                  echo "ERREUR : $F declare macOS $MINOS minimum, au-dessus de 11.0 — le .dmg ne tournerait pas sur macOS 11."
+                  FAILED=1
+                else
+                  echo "ok : $F (minos $MINOS)"
+                fi
+              fi
+            fi
+          done
+          if [ "$FAILED" -ne 0 ]; then exit 1; fi
 
       # Signature ad-hoc (identite "-") : uniquement sur le depot public.
       # Gratuite et immediate, sans compte Apple Developer -- mais ce n'est

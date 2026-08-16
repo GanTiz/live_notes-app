@@ -1,0 +1,25 @@
+# Dependances applicatives pour les DEUX builds macOS (arm64 et Intel), en
+# plus de packaging/requirements.txt. Deux differences avec requirements.txt
+# (utilise par Windows et le mode serveur) : numpy<2 et pypdfium2<=5.9.0.
+#
+# numpy>=2 publie des roues macOS "macosx_14_0_arm64/x86_64" qui lient leur
+# BLAS via de nouveaux symboles Accelerate (ex. _cblas_caxpy$NEWLAPACK$ILP64)
+# absents avant macOS 14. Sur un runner macOS 14/15, pip choisit cette roue et
+# le bundle qui en resulte crash au lancement sur macOS 12/13. numpy 1.26
+# (derniere branche 1.x) n'embarque que des roues OpenBLAS
+# (macosx_11_0_arm64 / macosx_10_9_x86_64), compatibles du macOS 11 au plus
+# recent : epingler numpy<2 garantit que le .dmg tourne des macOS 11 (le
+# minimum vise).
+#
+# pypdfium2 est bloque sur <=5.9.0, la derniere 5.x a des roues macOS
+# "macosx_11_0_arm64/x86_64". Depuis la 5.10 les roues exigent macOS 13
+# ("macosx_13_0_*"), et le garde-fou `minos <= 11.0` du workflow echouerait :
+# PDFium embarque dans le bundle, un .dmg prive de lecture PDF sur un Mac plus
+# ancien. L'API utilisee par pdfdoc.py (PdfDocument, page.render(scale),
+# bitmap.to_pil()) est stable de la 4.x a la 5.9.
+Flask>=3.0
+flask-sock>=0.7
+numpy<2
+Pillow>=10.0
+qrcode>=7.4
+pypdfium2>=4,<=5.9.0

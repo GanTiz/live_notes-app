@@ -878,28 +878,61 @@
     });
   }
 
-  function savePreset() {
-    var name = prompt('Nom du preset :', (currentBrush.name || 'Pinceau') + ' perso');
-    if (!name) return;
-    var preset = JSON.parse(JSON.stringify(BE.normalize(currentBrush)));
-    preset.name = name;
-    delete preset.id;
+  function promptUser(title, defaultValue) {
+    // `window.prompt` ne s'affiche pas dans la fenetre macOS (WKWebView ne
+    // l'implémente pas : il renvoie falsy et la sauvegarde de preset echouait
+    // sans un mot). Une modale interne rend le nom du preset possible partout.
+    return new Promise(function (resolve) {
+      $('prompt-title').textContent = title;
+      $('prompt-input').value = defaultValue || '';
+      var done = function (value) {
+        $('prompt-screen').style.display = 'none';
+        $('prompt-ok').removeEventListener('click', onOk);
+        $('prompt-cancel').removeEventListener('click', onCancel);
+        $('prompt-input').removeEventListener('keydown', onKey);
+        resolve(value);
+      };
+      var onOk = function () { done($('prompt-input').value); };
+      var onCancel = function () { done(null); };
+      var onKey = function (event) {
+        if (event.key === 'Enter') onOk();
+        else if (event.key === 'Escape') onCancel();
+      };
+      $('prompt-ok').addEventListener('click', onOk);
+      $('prompt-cancel').addEventListener('click', onCancel);
+      $('prompt-input').addEventListener('keydown', onKey);
+      $('prompt-screen').style.display = 'flex';
+      $('prompt-input').focus();
+      $('prompt-input').select();
+    });
+  }
 
-    fetch('/api/presets', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(preset)
-    })
-      .then(function (response) { return response.json(); })
-      .then(function (data) {
-        if (data.error) { status(data.error); return; }
-        library.userPresets = data.userPresets;
-        currentBrush = data.preset;
-        renderLibrary();
-        onBrushChanged();
-        status('Preset « ' + name + ' » enregistré.');
-      })
-      .catch(function () { status('Impossible d’enregistrer le preset.'); });
+  function savePreset() {
+    var brush = currentBrush;
+    if (!brush) return;
+    promptUser('Nom du preset :', (brush.name || 'Pinceau') + ' perso')
+      .then(function (name) {
+        if (!name) return;
+        var preset = JSON.parse(JSON.stringify(BE.normalize(brush)));
+        preset.name = name;
+        delete preset.id;
+
+        fetch('/api/presets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(preset)
+        })
+          .then(function (response) { return response.json(); })
+          .then(function (data) {
+            if (data.error) { status(data.error); return; }
+            library.userPresets = data.userPresets;
+            currentBrush = data.preset;
+            renderLibrary();
+            onBrushChanged();
+            status('Preset « ' + name + ' » enregistré.');
+          })
+          .catch(function () { status('Impossible d’enregistrer le preset.'); });
+      });
   }
 
   function deletePreset(id, name) {
@@ -3105,14 +3138,26 @@
 
   function saveProject() {
     if (isTablet || !ready) return;
-    var blob = new Blob([JSON.stringify(projectData(), null, 2)],
-      { type: 'application/json' });
-    var link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = (mediaName ? withoutExtension(mediaName) : 'live_notes') + '.lvn';
-    link.click();
-    setTimeout(function () { URL.revokeObjectURL(link.href); }, 0);
-    status('Projet enregistré.');
+    var name = (mediaName ? withoutExtension(mediaName) : 'live_notes') + '.lvn';
+    status('Enregistrement du projet…');
+    // Un `<a download>` sur un blob marche avec Chrome mais pas avec la
+    // fenetre macOS (WKWebView navigue vers le blob et remplace l'ecran par
+    // le JSON). Le nom et le dossier passent donc par un dialogue natif cote
+    // serveur, comme pour le choix du media et du dossier d'export.
+    fetch('/api/project/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: JSON.stringify(projectData(), null, 2),
+        name: name
+      })
+    })
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        if (data.error) { status(data.error); return; }
+        status(data.cancelled ? 'Enregistrement annulé.' : 'Projet enregistré.');
+      })
+      .catch(function () { status('Impossible d’enregistrer le projet.'); });
   }
 
   function loadProject(file) {
