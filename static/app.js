@@ -709,6 +709,29 @@
   $('tab-brush').addEventListener('click', function () { setPanelTab('brush'); });
   $('tab-layers').addEventListener('click', function () { setPanelTab('layers'); });
 
+  /* Les icônes de la liste sont dessinées, pas écrites : un emoji arrive avec
+   * la police du système, sa propre couleur et sa propre chasse — au milieu
+   * d'une interface entièrement en SVG monochrome, il détonne et change
+   * d'allure d'un poste à l'autre. */
+  var LAYER_ICONS = {
+    eye: '<path d="M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/>'
+      + '<circle cx="12" cy="12" r="2.6"/>',
+    eyeOff: '<path d="M4 5l16 14"/>'
+      + '<path d="M9.3 7A9.7 9.7 0 0 1 12 6.6c6 0 9.5 5.4 9.5 5.4a17 17 0 0 1-3.2 3.7"/>'
+      + '<path d="M6.4 8.6A16.6 16.6 0 0 0 2.5 12S6 17.4 12 17.4a9.6 9.6 0 0 0 3.3-.6"/>',
+    lock: '<rect x="5.5" y="10.5" width="13" height="9.5" rx="1.6"/>'
+      + '<path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
+    trash: '<path d="M5 7h14"/><path d="M9.5 7V5.2h5V7"/><path d="M7 7l.9 12.3h8.2L17 7"/>'
+  };
+
+  function layerIcon(name) {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = LAYER_ICONS[name];
+    return svg;
+  }
+
   /** Dessine la liste des couches. Le premier plan en haut, comme partout. */
   function syncLayerPanel() {
     var host = $('layer-list');
@@ -726,7 +749,7 @@
       var eye = document.createElement('button');
       eye.type = 'button';
       eye.className = 'btn-icon';
-      eye.textContent = layer.visible ? '👁' : '⃠';
+      eye.appendChild(layerIcon(layer.visible ? 'eye' : 'eyeOff'));
       eye.title = (layer.visible ? 'Masquer ' : 'Afficher ') + layer.name
         + ' — une couche masquée ne s’exporte pas';
       eye.setAttribute('aria-label', eye.title);
@@ -751,17 +774,21 @@
       row.appendChild(pick);
 
       if (layer.id !== activeId) {
-        var lock = document.createElement('span');
-        lock.className = 'layer-lock';
-        lock.textContent = '🔒';
-        lock.title = 'Verrouillée — cliquer son nom pour y revenir';
+        var lock = layerIcon('lock');
+        lock.setAttribute('class', 'layer-lock');
+        lock.setAttribute('role', 'img');
+        lock.setAttribute('aria-label', 'Verrouillée');
+        lock.removeAttribute('aria-hidden');
+        var why = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        why.textContent = 'Verrouillée — cliquer son nom pour y revenir';
+        lock.appendChild(why);
         row.appendChild(lock);
       }
 
       var kill = document.createElement('button');
       kill.type = 'button';
       kill.className = 'btn-icon';
-      kill.textContent = '🗑';
+      kill.appendChild(layerIcon('trash'));
       kill.title = 'Supprimer ' + layer.name;
       kill.setAttribute('aria-label', kill.title);
       kill.addEventListener('click', function () { removeLayer(layer.id); });

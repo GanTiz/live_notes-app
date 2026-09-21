@@ -663,14 +663,28 @@
             flex-shrink: 0;
             width: 24px; height: 24px;
             padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             background: transparent;
             border-color: transparent;
             color: var(--text-dim);
-            font-size: 13px;
-            line-height: 1;
         }
         .layer-row .btn-icon:hover { border-color: var(--border); }
-        .layer-lock { flex-shrink: 0; font-size: 11px; color: var(--text-faint); }
+        .layer-row svg {
+            width: 15px; height: 15px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.6;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .layer-lock {
+            flex-shrink: 0;
+            width: 13px; height: 13px;
+            color: var(--text-faint);
+        }
+        .layer-row svg.layer-lock { width: 13px; height: 13px; stroke-width: 1.8; }
 
         #panel h3 {
             margin: 0 0 3px;
