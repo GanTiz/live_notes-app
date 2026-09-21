@@ -59,6 +59,9 @@
   var drawing = false;
   var stroke = null;
   var stamper = null;
+  /* Qui tient le trait en cours : un pincement abandonne celui d'un doigt,
+   * jamais celui d'un stylet (voir « Pincement tactile »). */
+  var strokePointer = 'mouse';
 
   var recording = false;
   var t0 = null;
@@ -70,6 +73,7 @@
    * ou null. Voir « Rejeu ». */
   var replay = null;
   var recFrame = null;
+  var underlayStart = null;   /* horloge du rejeu chez le suiveur (voir recElapsed) */
   var previewStart = 0;
   var previewFrame = null;
   var previewDuration = 0;
@@ -732,11 +736,17 @@
     return svg;
   }
 
-  /** Dessine la liste des couches. Le premier plan en haut, comme partout. */
+  /** Dessine la liste des couches. Le premier plan en haut, comme partout.
+   *
+   *  Rien n'est reconstruit quand l'onglet est fermé : chaque fin de trace
+   *  appelle cette fonction, et rebâtir une liste que personne ne regarde
+   *  coûterait du temps au stylet qui, lui, dessine. */
   function syncLayerPanel() {
     var host = $('layer-list');
     if (!host) return;
     $('tab-layers-count').textContent = String(layers.length);
+    // L'onglet est fermé : la liste sera redessinée à son ouverture.
+    if (panelTab !== 'layers') return;
     host.textContent = '';
 
     // Premier plan en haut : on lit une pile du dessus.
@@ -818,7 +828,7 @@
     syncHistoryButtons();
     requestRedraw();
     updateExportState();
-    emit({ t: 'layers', list: layerState(), activeId: activeId });
+    publishLayers();
     status(layer.name + ' ajoutée — les couches du dessous sont verrouillées.');
   }
 
@@ -831,11 +841,14 @@
       status('Rendre une autre couche active avant de masquer « ' + layer.name + ' ».');
       return;
     }
+    // Masquer une couche rejouée sous le stylet la ferait disparaître au
+    // milieu de sa propre animation.
+    if (recording) { status('Terminer l’enregistrement avant de masquer une couche.'); return; }
     layer.visible = !layer.visible;
     syncLayerPanel();
     requestRedraw();
     updateExportState();
-    emit({ t: 'layers', list: layerState(), activeId: activeId });
+    publishLayers();
     status(layer.name + (layer.visible ? ' affichée.' : ' masquée — elle ne s’exportera pas.'));
   }
 
@@ -851,7 +864,7 @@
     // Il y a toujours au moins une couche : la dernière se vide au lieu de
     // disparaître, sans quoi il n'y aurait plus où dessiner.
     if (layers.length === 1) {
-      setActiveLayer(layer.id, true);
+      // Elle est forcément l'active : il n'y en a pas d'autre.
       clearActiveLayer();
     } else {
       layers = layers.filter(function (item) { return item !== layer; });
@@ -864,7 +877,7 @@
     syncHistoryButtons();
     requestRedraw();
     updateExportState();
-    emit({ t: 'layers', list: layerState(), activeId: activeId });
+    publishLayers();
     status(layer.name + ' supprimée.');
   }
 
@@ -1399,6 +1412,7 @@
   function stopUnderlay() {
     if (recFrame) cancelAnimationFrame(recFrame);
     recFrame = null;
+    underlayStart = null;
     if (!replay) return;
     replay = null;
     // Les couches rejouées sont peut-être arrêtées en plein milieu : on les
@@ -1414,7 +1428,13 @@
    *  ici : l'origine doit rester la première image du rush, pas la première
    *  image d'animation qui passe. */
   function recElapsed() {
-    return t0 === null ? 0 : Math.max(0, performance.now() - t0);
+    if (t0 !== null) return Math.max(0, performance.now() - t0);
+    // Le suiveur ne pose aucun point : il n'a pas d'origine des temps à lui,
+    // seulement un rejeu à faire avancer. Lui laisser écrire `t0` reviendrait
+    // à figer l'origine sur l'instant d'arrivée du message plutôt que sur la
+    // première image du rush — et ce décalage-là suivrait ensuite tout ce
+    // qu'il dessinerait s'il reprenait la main.
+    return underlayStart === null ? 0 : Math.max(0, performance.now() - underlayStart);
   }
 
   function recTick() {
@@ -1529,12 +1549,20 @@
 
   /** Remplace les couches courantes par celles d'un projet. Les canevas sont
    *  vides en sortie : c'est au chargeur de les reconstruire. */
+  /** Une trace dont on peut faire quelque chose : le rejeu lit `points[0].t`
+   *  sans détour, et un fichier tronqué en plein enregistrement ne doit pas
+   *  faire tomber la prévisualisation entière. */
+  function usableStroke(item) {
+    return !!item && Array.isArray(item.points) && item.points.length > 0
+      && typeof item.points[0].t === 'number';
+  }
+
   function adoptLayers(raw, wantedActive) {
     layerSeq = 0;
     layers = raw.map(function (item) {
       var layer = makeLayer(item.name);
       layer.visible = item.visible !== false;
-      layer.strokes = item.strokes;
+      layer.strokes = item.strokes.filter(usableStroke);
       layer.clears = item.clears;
       layer.durationMs = Number(item.durationMs) || 0;
       // L'historique ne traverse pas un enregistrement : on ne rejoue pas
@@ -1556,6 +1584,19 @@
     return layers.map(function (layer) {
       return { id: layer.id, name: layer.name, visible: layer.visible };
     });
+  }
+
+  /** Publie la pile vers la tablette.
+   *
+   *  Pas par `emit` : celui-ci ne laisse passer que le détenteur du stylet, et
+   *  le poste structure les couches précisément pendant que la tablette
+   *  dessine. Les deux écrans se mettraient alors à ranger les mêmes tracés
+   *  dans des couches différentes, et c'est la charge du poste qui part à
+   *  l'export. C'est le poste qui fait autorité sur la pile, qu'il tienne le
+   *  stylet ou non. */
+  function publishLayers() {
+    if (isTablet || sessionMode !== 'live' || !REMOTE.isOnline()) return;
+    REMOTE.send({ t: 'layers', list: layerState(), activeId: activeId });
   }
 
   /* ------------------------------------------------------------ Couches */
@@ -1626,6 +1667,10 @@
   function setActiveLayer(id, quiet) {
     var layer = layerById(id);
     if (!layer || id === activeId) return;
+    // Changer de couche pendant une prise ferait écrire le stylet dans le
+    // canevas qu'un rejeu est en train de reconstruire, et la durée de la
+    // prise atterrirait sur la mauvaise couche.
+    if (recording) { status('Terminer l’enregistrement avant de changer de couche.'); return; }
     activeId = id;
     // On ne dessine pas à l'aveugle : rendre une couche active la montre.
     layer.visible = true;
@@ -1634,7 +1679,7 @@
     requestRedraw();
     updateExportState();
     if (!quiet) {
-      emit({ t: 'layers', list: layerState(), activeId: activeId });
+      publishLayers();
       status('Couche active : ' + activeLayer().name + '.');
     }
   }
@@ -1646,6 +1691,10 @@
     layers = [makeLayer()];
     activeId = layers[0].id;
     bindActiveLayer();
+    t0 = null;
+    lastElapsed = 0;
+    recordedDuration = 0;
+    scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
     syncLayerPanel();
   }
 
@@ -1670,20 +1719,27 @@
     scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
     t0 = null;
     lastElapsed = 0;
+    // Sans ça, une prise de trente secondes effacée laissait un plancher de
+    // trente secondes : le dessin suivant, long de deux, s'exportait en trente.
+    recordedDuration = 0;
     syncLayerPanel();
     requestRedraw();
     updateExportState();
   }
 
   /** Reconstruit le canevas d'une couche à partir de ses métadonnées. */
+  var rebuildBuffer = null;
+
   function rebuildLayer(layer) {
     layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
     // Un effacement remet la couche à zéro : seul ce qui suit le dernier compte.
     var lastClear = layer.clears.length ? Math.max.apply(null, layer.clears) : -Infinity;
+    if (!rebuildBuffer) rebuildBuffer = document.createElement('canvas');
     layer.strokes.forEach(function (item) {
       var points = item.points.filter(function (point) { return point.t >= lastClear; });
       if (!points.length) return;
-      var trace = makeTrace({ brush: item.brush, seed: item.seed, points: points });
+      var trace = makeTrace({ brush: item.brush, seed: item.seed, points: points },
+                            rebuildBuffer);
       feedTrace(trace, Infinity);
       commitTrace(trace, layer.ctx);
     });
@@ -1791,7 +1847,9 @@
     var current = activeLayer();
     layers.forEach(function (layer) {
       if (!layer.visible) return;
-      ctx.drawImage(layer.canvas, 0, 0);
+      // Une couche vide n'a rien à composer : ajouter une couche ne doit pas
+      // coûter une image entière de recopie à chaque déplacement du stylet.
+      if (layer.strokes.length || layer === current) ctx.drawImage(layer.canvas, 0, 0);
       replayPending(layer).forEach(function (trace) {
         composite(ctx, trace.canvas, trace.brush);
       });
@@ -1841,6 +1899,7 @@
     if (event.button > 0) return;
     canvas.setPointerCapture(event.pointerId);
     drawing = true;
+    strokePointer = event.pointerType || 'mouse';
     setTabletDrawingState(true);
 
     var brush = shortcutBrush();
@@ -2249,6 +2308,10 @@
     if (event.pointerType !== 'touch') return;
     touching[event.pointerId] = { x: event.clientX, y: event.clientY };
     if (touchCount() !== 2) return;
+    // Un trait au stylet n'est jamais interrompu : la paume et un doigt posés
+    // à côté ne doivent pas lui couper son geste. Le pincement attendra que
+    // le stylet soit relevé — il ne commence même pas.
+    if (drawing && strokePointer === 'pen') return;
     // En phase de capture : le garde de `onPointerDown` lit `pinch` juste
     // après, et le second doigt ne commence donc aucun trait.
     abortStroke();
@@ -2435,9 +2498,14 @@
     return text;
   }
 
+  /** Durée du rendu : celle de ce qui sortira réellement du tuyau. Une couche
+   *  masquée n'y entre pas — sans quoi une prise de soixante secondes qu'on a
+   *  masquée imposerait sa longueur à l'annotation de deux qui la remplace, et
+   *  le fichier livré serait fait de cinquante-huit secondes de vide. */
   function duration() {
-    var last = recordedDuration;
+    var last = 0;
     layers.forEach(function (layer) {
+      if (!layer.visible) return;
       last = Math.max(last, layer.durationMs || 0);
       layer.strokes.forEach(function (item) {
         var points = item.points;
@@ -3524,8 +3592,9 @@
     if (recording) {
       // Pendant le REC on repart d'une toile vierge sans perdre l'enregistrement :
       // l'effacement devient un évènement de la timeline, rejoué à l'export.
-      applyClear(activeLayer(), elapsed());
-      emit({ t: 'clear', at: activeLayer().clears[activeLayer().clears.length - 1] });
+      var at = elapsed();
+      applyClear(activeLayer(), at);
+      emit({ t: 'clear', at: at });
       status('Couche effacée — le tracé déjà enregistré est conservé.');
       return;
     }
@@ -3551,10 +3620,18 @@
    *  la tablette a dessiné (voir `remoteStrokeEnd`). Sans elle, ce tracé-là
    *  repartait à l'export sur une autre graine que celle affichée sous le
    *  stylet — donc une autre dispersion et d'autres taches. */
-  function makeTrace(item) {
-    var traceCanvas = document.createElement('canvas');
-    traceCanvas.width = canvas.width;
-    traceCanvas.height = canvas.height;
+  function makeTrace(item, reuse) {
+    // `reuse` : un même tampon sert à toute une reconstruction. Les traces y
+    // passent l'une après l'autre, jamais en même temps — allouer un canevas
+    // pleine définition par trace rendait une annulation quadratique, et
+    // remonter deux cents gestes allouait deux cents fois huit mégaoctets.
+    var traceCanvas = reuse || document.createElement('canvas');
+    if (traceCanvas.width !== canvas.width || traceCanvas.height !== canvas.height) {
+      traceCanvas.width = canvas.width;
+      traceCanvas.height = canvas.height;
+    } else if (reuse) {
+      traceCanvas.getContext('2d').clearRect(0, 0, traceCanvas.width, traceCanvas.height);
+    }
     var traceCtx = traceCanvas.getContext('2d');
     return {
       canvas: traceCanvas,
@@ -4714,7 +4791,7 @@
         // Une tablette qui arrive ne connaît pas encore la pile : le poste la
         // lui dit. Le contenu déjà dessiné, lui, ne se rattrape pas — c'était
         // déjà le cas des traces avant les couches.
-        if (!isTablet) emit({ t: 'layers', list: layerState(), activeId: activeId });
+        publishLayers();
         return undefined;
       default: return undefined;
     }
@@ -4800,7 +4877,7 @@
     clearActiveLayer();
     startUnderlay();
     recording = true;
-    t0 = performance.now();
+    underlayStart = performance.now();
     if (replay) recFrame = requestAnimationFrame(recTick);
     // Le lecteur de cet écran suit celui qui enregistre. Sans le verrou, sa
     // propre borne de sortie l'arrêterait de son côté pendant que l'autre

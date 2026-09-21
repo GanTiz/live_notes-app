@@ -94,18 +94,40 @@ class _Sheet:
         self.clears = list(clears)
 
 
+def _as_list(value):
+    return value if isinstance(value, list) else []
+
+
 def payload_sheets(payload):
     """Les couches decrites par une charge utile, du fond vers le premier plan.
 
     Une charge d'avant les couches -- `strokes` et `clears` a plat -- en decrit
     une seule : elle rend donc exactement comme avant, et les bancs qui
     l'emploient n'ont rien a changer.
+
+    Rien n'est suppose de la forme recue : la charge vient d'une requete HTTP,
+    et une entree malformee doit ressortir en refus explique, pas en trace
+    d'exception. Ce qui n'est pas lisible est ignore.
     """
     raw = payload.get("layers")
     if isinstance(raw, list) and raw:
-        return [{"strokes": sheet.get("strokes") or [], "clears": sheet.get("clears") or []}
-                for sheet in raw]
-    return [{"strokes": payload.get("strokes") or [], "clears": payload.get("clears") or []}]
+        return [{"strokes": _as_list(sheet.get("strokes")),
+                 "clears": _as_list(sheet.get("clears"))}
+                for sheet in raw if isinstance(sheet, dict)]
+    return [{"strokes": _as_list(payload.get("strokes")),
+             "clears": _as_list(payload.get("clears"))}]
+
+
+def _clear_times(values):
+    """Les instants d'effacement lisibles d'une couche, dans l'ordre."""
+    times = []
+    for value in values:
+        try:
+            times.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    times.sort()
+    return times
 
 
 def _merge(bbox, region):
@@ -648,6 +670,8 @@ def frame_count(payload, fps):
     last = 0.0
     for sheet in payload_sheets(payload):
         for stroke in sheet["strokes"]:
+            if not isinstance(stroke, dict):
+                continue
             points = stroke.get("points") or []
             if points:
                 try:
@@ -709,6 +733,8 @@ def render(payload, output_path, progress=None, cancelled=None):
     for raw in payload_sheets(payload):
         planned_strokes = []
         for stroke in raw["strokes"]:
+            if not isinstance(stroke, dict):
+                continue
             brush = be.normalize(stroke.get("brush", {}))
             key = _brush_key(brush)
             cache = caches.get(key)
@@ -722,9 +748,7 @@ def render(payload, output_path, progress=None, cancelled=None):
         if not planned_strokes:
             continue
         planned_strokes.sort(key=lambda s: s.times[0])
-        sheets.append(_Sheet(planned_strokes,
-                             sorted(float(value) for value in raw["clears"]),
-                             out_h, out_w))
+        sheets.append(_Sheet(planned_strokes, _clear_times(raw["clears"]), out_h, out_w))
 
     if not sheets:
         raise RenderError("Aucun trace a exporter.")

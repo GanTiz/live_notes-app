@@ -1216,7 +1216,12 @@ def exported_layers(page):
 
 
 def fresh_layer(page):
-    """Une couche vide et active, pour partir de quelque chose de connu."""
+    """Une couche vide et active, pour partir de quelque chose de connu.
+
+    L'onglet est ouvert au passage : la liste ne se redessine pas quand elle
+    n'est pas a l'ecran, et plusieurs bancs lisent ses lignes.
+    """
+    page.click("tab-layers")
     page.click("btn-layer-add")
     page.pump(0.3)
 

@@ -722,6 +722,32 @@ def test_a_clear_only_wipes_its_own_layer():
     return "couche du dessous effacee, couche du dessus intacte"
 
 
+def test_a_malformed_payload_is_refused_not_crashed():
+    """La charge vient d'une requete HTTP : rien de sa forme n'est suppose.
+
+    Une entree tordue doit ressortir en refus explique, pas en trace
+    d'exception -- c'est un 400 que la page sait lire, pas un 500.
+    """
+    for bad in ({"layers": ["oups"]}, {"layers": [None]}, {"layers": [42]},
+                {"layers": [{"strokes": "pas une liste", "clears": 3}]},
+                {"layers": []}, {}):
+        sheets = renderer.payload_sheets(bad)
+        assert isinstance(sheets, list), bad
+        for sheet in sheets:
+            assert isinstance(sheet["strokes"], list), bad
+            assert isinstance(sheet["clears"], list), bad
+        renderer.frame_count(dict(bad, durationMs=100), 25)
+
+    # Un effacement illisible est ignore, il n'interrompt pas le rendu.
+    path = os.path.join(TMP, "couches_effacement_tordu.mov")
+    renderer.render(payload(flatten="alpha", codec="prores4444",
+                            layers=[{"strokes": payload()["strokes"],
+                                     "clears": [None, "abc", 200.0]}],
+                            strokes=[]), path)
+    assert os.path.getsize(path) > 0
+    return "six formes tordues absorbees, effacement illisible ignore"
+
+
 def test_an_empty_layer_changes_nothing():
     """Une couche sans trace -- jamais dessinee, ou masquee donc jamais envoyee --
     ne coute ni canevas ni pixel."""
@@ -743,6 +769,7 @@ TESTS = [
     test_a_flat_payload_renders_exactly_as_one_layer,
     test_a_clear_only_wipes_its_own_layer,
     test_an_empty_layer_changes_nothing,
+    test_a_malformed_payload_is_refused_not_crashed,
     test_the_stroke_alone_keeps_its_alpha,
     test_a_solid_background_ignores_the_media,
     test_the_media_is_flattened_under_the_stroke,
