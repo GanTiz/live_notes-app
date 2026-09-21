@@ -86,10 +86,17 @@ def _parse_macos_version(version_str):
     if not version_str:
         return None
     parts = version_str.split(".")
-    if not parts or not parts[0].isdigit():
+    # Tout ce qui se lit doit se lire : un « 12.x » n'est pas un macOS 12 dont
+    # on ignorerait le mineur, c'est une chaine qu'on ne comprend pas. Et une
+    # version incomprise passe (voir `refuse_unsupported_macos`) plutot que
+    # d'etre devinee -- deviner « 10.x » en macOS 10 refuserait le demarrage
+    # sur la foi d'une moitie de chaine.
+    if not parts[0].isdigit():
+        return None
+    if len(parts) > 1 and not parts[1].isdigit():
         return None
     major = int(parts[0])
-    minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    minor = int(parts[1]) if len(parts) > 1 else 0
     return (major, minor)
 
 

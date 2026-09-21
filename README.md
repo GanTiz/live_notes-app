@@ -15,6 +15,10 @@ image.
   entièrement paramétrables — forme, taille, opacité, flux, dureté,
   variations aléatoires, réponse à la pression du stylet — avec presets
   personnalisés.
+- **Couches et historique** : verrouiller une prise réussie et travailler
+  par-dessus plutôt que de tout refaire — les couches verrouillées se rejouent
+  animées, calées sur le média, sous le stylet qui dessine la suivante.
+  Annuler / rétablir sans limite de nombre.
 - **N'importe quel média de fond** : vidéo (tout codec, y compris ProRes/DNxHD
   via une copie de lecture automatique), image, audio, ou une page de PDF
   rasterisée à la volée.
@@ -80,9 +84,12 @@ fonctionnement du pipeline de build, voir le
 
 ## Tests
 
+Ils tournent aussi en intégration continue, sur le dépôt public — voir
+`.github/workflows/tests.yml`.
+
 ```bash
 py test_colorspace.py   # conversion sRGB → Rec. 709
-py test_export.py       # couches d'export : cadrage, bornes, synchronisation
+py test_export.py       # couches de dessin et d'export : empilement, cadrage, bornes
 py test_proxy.py        # transcodage / lisibilité des rushes, PDF
 py test_session.py      # appairage tablette, publication de la config
 py test_ui.py           # parcours complet dans un vrai navigateur (CDP)

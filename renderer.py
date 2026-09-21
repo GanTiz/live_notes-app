@@ -71,6 +71,43 @@ class _ActiveStroke:
             self.bbox[3] = max(self.bbox[3], region[3])
 
 
+class _Sheet:
+    """Une couche de dessin au rejeu.
+
+    Chaque couche s'accumule dans son propre canevas premultiplie, et les
+    canevas sont composes dans l'ordre de la liste -- le premier au fond. C'est
+    ce qui fait qu'une trace de la couche 1 posee a t = 5 s passe SOUS une
+    trace de la couche 2 posee a t = 1 s : sur une toile unique, rejouee
+    chronologiquement, elle passerait dessus.
+
+    Une gomme n'attaque que sa propre couche, pour la meme raison qu'elle
+    n'attaque que son calque dans n'importe quel outil a calques : sans cela
+    les couches ne seraient plus composables separement.
+    """
+
+    __slots__ = ("canvas", "pending", "actives", "clears")
+
+    def __init__(self, planned_strokes, clears, height, width):
+        self.canvas = np.zeros((height, width, 4), dtype=np.float32)
+        self.pending = list(planned_strokes)
+        self.actives = []
+        self.clears = list(clears)
+
+
+def payload_sheets(payload):
+    """Les couches decrites par une charge utile, du fond vers le premier plan.
+
+    Une charge d'avant les couches -- `strokes` et `clears` a plat -- en decrit
+    une seule : elle rend donc exactement comme avant, et les bancs qui
+    l'emploient n'ont rien a changer.
+    """
+    raw = payload.get("layers")
+    if isinstance(raw, list) and raw:
+        return [{"strokes": sheet.get("strokes") or [], "clears": sheet.get("clears") or []}
+                for sheet in raw]
+    return [{"strokes": payload.get("strokes") or [], "clears": payload.get("clears") or []}]
+
+
 def _merge(bbox, region):
     if region is None:
         return bbox
@@ -318,14 +355,32 @@ def _apply_layer(target, alpha, color, opacity, eraser):
         target[..., 3] += a
 
 
-def _write_region(canvas, actives, bbox, out_u8, alpha_mode, background):
-    """Recalcule out_u8 sur la region donnee a partir du canvas + traces actifs."""
+def _stack_sheet(target, source):
+    """Compose une couche premultipliee sur une autre (source-over, in-place)."""
+    inv = (1.0 - source[..., 3])[..., None]
+    target *= inv
+    target += source
+
+
+def _write_region(sheets, bbox, out_u8, alpha_mode, background):
+    """Recalcule out_u8 sur la region donnee en empilant toutes les couches.
+
+    Chaque couche est prise dans son etat courant, ses traces en cours d'ecriture
+    comprises : une trace qui n'est pas encore terminee doit deja passer sous la
+    couche du dessus, pas par-dessus la pile.
+    """
     y0, y1, x0, x1 = bbox
-    region = canvas[y0:y1, x0:x1].copy()
-    for stroke in actives:
-        planned = stroke.planned
-        _apply_layer(region, stroke.scratch[y0:y1, x0:x1], planned.color,
-                     planned.opacity, planned.eraser)
+    region = None
+    for sheet in sheets:
+        layer = sheet.canvas[y0:y1, x0:x1].copy()
+        for stroke in sheet.actives:
+            planned = stroke.planned
+            _apply_layer(layer, stroke.scratch[y0:y1, x0:x1], planned.color,
+                         planned.opacity, planned.eraser)
+        if region is None:
+            region = layer
+        else:
+            _stack_sheet(region, layer)
 
     np.clip(region, 0.0, 1.0, out=region)
     dest = out_u8[y0:y1, x0:x1]
@@ -591,13 +646,14 @@ def frame_count(payload, fps):
     ne tomberait plus juste.
     """
     last = 0.0
-    for stroke in payload.get("strokes") or []:
-        points = stroke.get("points") or []
-        if points:
-            try:
-                last = max(last, float(points[-1].get("t") or 0.0))
-            except (AttributeError, TypeError, ValueError):
-                pass
+    for sheet in payload_sheets(payload):
+        for stroke in sheet["strokes"]:
+            points = stroke.get("points") or []
+            if points:
+                try:
+                    last = max(last, float(points[-1].get("t") or 0.0))
+                except (AttributeError, TypeError, ValueError):
+                    pass
     duration_ms = max(float(payload.get("durationMs") or 0.0), last) + TAIL_MS
     return max(1, int(math.ceil(duration_ms * fps / 1000.0)))
 
@@ -649,26 +705,32 @@ def render(payload, output_path, progress=None, cancelled=None):
     scale = out_w / float(src_w)
 
     caches = {}
-    planned_strokes = []
-    for stroke in payload.get("strokes") or []:
-        brush = be.normalize(stroke.get("brush", {}))
-        key = _brush_key(brush)
-        cache = caches.get(key)
-        if cache is None:
-            cache = caches[key] = be.StampCache(brush)
-        planned = be.plan_stroke(stroke, scale=scale, cache=cache)
-        if planned.count:
-            planned_strokes.append(planned)
+    sheets = []
+    for raw in payload_sheets(payload):
+        planned_strokes = []
+        for stroke in raw["strokes"]:
+            brush = be.normalize(stroke.get("brush", {}))
+            key = _brush_key(brush)
+            cache = caches.get(key)
+            if cache is None:
+                cache = caches[key] = be.StampCache(brush)
+            planned = be.plan_stroke(stroke, scale=scale, cache=cache)
+            if planned.count:
+                planned_strokes.append(planned)
+        # Une couche vide -- jamais dessinee, ou masquee donc jamais envoyee --
+        # n'a pas de canevas a elle : a 4K ce serait 132 Mo pour rien.
+        if not planned_strokes:
+            continue
+        planned_strokes.sort(key=lambda s: s.times[0])
+        sheets.append(_Sheet(planned_strokes,
+                             sorted(float(value) for value in raw["clears"]),
+                             out_h, out_w))
 
-    if not planned_strokes:
+    if not sheets:
         raise RenderError("Aucun trace a exporter.")
-
-    planned_strokes.sort(key=lambda s: s.times[0])
-    clears = sorted(float(value) for value in (payload.get("clears") or []))
 
     total_frames = frame_count(payload, fps)
 
-    canvas = np.zeros((out_h, out_w, 4), dtype=np.float32)
     # Etat initial du buffer de sortie : seules les regions "sales" sont
     # recalculees ensuite, le reste doit donc deja etre correct.
     out_u8 = np.zeros((out_h, out_w, 4), dtype=np.uint8)
@@ -688,8 +750,6 @@ def render(payload, output_path, progress=None, cancelled=None):
     watcher = threading.Thread(target=_drain, args=(proc.stderr, errors), daemon=True)
     watcher.start()
 
-    pending = list(planned_strokes)
-    actives = []
     stdin = proc.stdin
 
     try:
@@ -700,48 +760,50 @@ def render(payload, output_path, progress=None, cancelled=None):
             frame_time = (frame_index + 1) * 1000.0 / fps
             dirty = None
 
-            # "Effacer" pendant l'enregistrement : la toile repart a zero, mais
-            # les traces deja poses restent dans les metadonnees (ils ont ete
-            # rejoues avant cet instant).
-            while clears and clears[0] <= frame_time:
-                clears.pop(0)
-                canvas[...] = 0.0
-                for stroke in actives:
-                    stroke.scratch[...] = 0.0
-                    stroke.bbox = None
-                dirty = _merge(dirty, (0, out_h, 0, out_w))
+            for sheet in sheets:
+                # "Effacer" pendant l'enregistrement : la couche repart a zero,
+                # mais les traces deja poses restent dans les metadonnees (ils
+                # ont ete rejoues avant cet instant). Les autres couches ne
+                # bougent pas : un effacement n'attaque que la sienne.
+                while sheet.clears and sheet.clears[0] <= frame_time:
+                    sheet.clears.pop(0)
+                    sheet.canvas[...] = 0.0
+                    for stroke in sheet.actives:
+                        stroke.scratch[...] = 0.0
+                        stroke.bbox = None
+                    dirty = _merge(dirty, (0, out_h, 0, out_w))
 
-            while pending and pending[0].times[0] <= frame_time:
-                actives.append(_ActiveStroke(pending.pop(0), out_h, out_w))
+                while sheet.pending and sheet.pending[0].times[0] <= frame_time:
+                    sheet.actives.append(_ActiveStroke(sheet.pending.pop(0), out_h, out_w))
 
-            finished = []
-            for stroke in actives:
-                planned = stroke.planned
-                cache = planned.cache
-                index = stroke.cursor
-                while index < planned.count and planned.times[index] <= frame_time:
-                    x = float(planned.xs[index])
-                    y = float(planned.ys[index])
-                    ix, iy = math.floor(x), math.floor(y)
-                    stamp = cache.get(float(planned.sizes[index]),
-                                      float(planned.angles[index]), x - ix, y - iy)
-                    alpha = float(planned.alphas[index])
-                    scaled = stamp if alpha >= 1.0 else stamp * alpha
-                    half = stamp.shape[0] // 2
-                    region = be.stamp_onto(stroke.scratch, scaled, ix - half, iy - half)
-                    stroke.grow(region)
-                    dirty = _merge(dirty, region)
-                    index += 1
-                stroke.cursor = index
-                if index >= planned.count:
-                    finished.append(stroke)
+                finished = []
+                for stroke in sheet.actives:
+                    planned = stroke.planned
+                    cache = planned.cache
+                    index = stroke.cursor
+                    while index < planned.count and planned.times[index] <= frame_time:
+                        x = float(planned.xs[index])
+                        y = float(planned.ys[index])
+                        ix, iy = math.floor(x), math.floor(y)
+                        stamp = cache.get(float(planned.sizes[index]),
+                                          float(planned.angles[index]), x - ix, y - iy)
+                        alpha = float(planned.alphas[index])
+                        scaled = stamp if alpha >= 1.0 else stamp * alpha
+                        half = stamp.shape[0] // 2
+                        region = be.stamp_onto(stroke.scratch, scaled, ix - half, iy - half)
+                        stroke.grow(region)
+                        dirty = _merge(dirty, region)
+                        index += 1
+                    stroke.cursor = index
+                    if index >= planned.count:
+                        finished.append(stroke)
 
-            for stroke in finished:
-                actives.remove(stroke)
-                _commit(canvas, stroke)
+                for stroke in finished:
+                    sheet.actives.remove(stroke)
+                    _commit(sheet.canvas, stroke)
 
             if dirty is not None:
-                _write_region(canvas, actives, dirty, out_u8, pipe_alpha, background)
+                _write_region(sheets, dirty, out_u8, pipe_alpha, background)
 
             stdin.write(out_u8.tobytes())
 

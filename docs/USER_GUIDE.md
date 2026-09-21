@@ -53,8 +53,76 @@ sans perdre le tracé déjà posé.
 - Zoom / dézoom / déplacement de la vue : `Ctrl` + molette (ou pincement au
   trackpad) pour zoomer, glisser à deux doigts ou clic molette pour se
   déplacer, `Ctrl 0` pour revenir au cadrage complet.
+- **Pincement à deux doigts** sur un écran tactile : il zoome et déplace en un
+  seul geste. Deux doigts naviguent, ils ne dessinent pas — le trait que le
+  premier avait commencé est abandonné, jamais enregistré. Le stylet n'est pas
+  concerné : une paume posée à côté ne lui coupe pas son geste.
+- **Annuler / Rétablir** (`↶` `↷` dans la barre d'outils, `Ctrl + Z` et
+  `Ctrl + Maj + Z`) : annuler retire la dernière trace — ou le dernier
+  effacement — de la couche active. Ce n'est pas un masquage : la trace annulée
+  ne réapparaîtra ni à la prévisualisation ni à l'export.
+  - Il n'y a pas de limite de nombre : on remonte jusqu'à la première trace de
+    la couche active, et on s'arrête là. **La profondeur de l'historique, c'est
+    la couche.**
+  - La pile de rétablissement se vide dès qu'une nouvelle trace est posée —
+    comme partout ailleurs.
+  - **Chaque couche garde son propre historique** : revenir sur une couche
+    verrouillée y retrouve ses gestes annulables. On n'annule jamais *à
+    travers* une couche.
+  - Relancer un REC ou charger un projet repartent d'un historique vide : on
+    ne rejoue pas l'histoire d'une session précédente.
 - Fonctionne à la souris, au tactile ou au stylet (pression prise en
   compte).
+
+## Couches
+
+Une couche est un groupe de traces qu'on choisit de **verrouiller** pour
+travailler par-dessus sans risquer d'y toucher. C'est la réponse à un problème
+simple : jusqu'ici, appuyer sur REC repartait d'une page blanche, et un trait
+raté à la douzième seconde d'une prise de trente coûtait la prise entière.
+
+Le parcours :
+
+1. REC, on dessine, la prise est bonne.
+2. **« Couche »** dans la barre d'outils (ou « ＋ Nouvelle couche » dans
+   l'onglet *Couches* du panneau de droite) : la couche courante est
+   verrouillée, une couche vide est posée par-dessus.
+3. REC à nouveau. **La couche verrouillée se rejoue sous le stylet**, animée et
+   calée sur le média : on voit exactement ce qui était déjà là, au moment où
+   ça arrivait, et on peut donc ajouter un trait *au bon moment*.
+4. Recommencer autant de fois qu'on veut.
+
+Ce qu'il faut savoir :
+
+- **REC ne vide que la couche active.** Les couches verrouillées ne bougent
+  pas — c'est tout l'intérêt. « Effacer » hors enregistrement suit la même
+  règle.
+- **Une seule couche est déverrouillée à la fois**, et c'est celle qui reçoit
+  les traces. Cliquer le nom d'une autre couche la rend active (et verrouille
+  la précédente) : un clic sur « Couche » ne coûte donc jamais le travail fait.
+- **L'œil** masque une couche. Une couche masquée ne s'affiche pas **et ne
+  s'exporte pas** — c'est la même notion, pas deux réglages. La fenêtre d'export
+  le rappelle en clair quand il y en a une. La couche active ne se masque pas
+  (on ne dessine pas à l'aveugle), et rendre active une couche masquée la
+  remontre.
+- **La corbeille** supprime n'importe quelle couche, la première comme la
+  troisième, avec confirmation dès qu'elle contient une trace. Supprimer n'est
+  pas annulable : c'est une opération sur la structure du projet, pas un geste
+  de dessin. La dernière couche restante se vide plutôt que de disparaître.
+- **La gomme n'attaque que sa propre couche.** Depuis la couche 2 on ne peut
+  pas gommer un trait de la couche 1 : il faut revenir sur la couche 1, ou la
+  supprimer. C'est le prix à payer pour que chaque couche reste composable
+  séparément.
+- **Toutes les couches partagent la même origine des temps** — le point IN du
+  média. Le `t = 0` de la couche 3 est le même instant que celui de la couche 1.
+- **L'empilement compte, et il compte dans le temps** : une trace de la couche 1
+  posée à 5 s passe *sous* une trace de la couche 2 posée à 1 s. Haut de la
+  liste = premier plan.
+
+En mode tablette, les couches se gèrent depuis le poste : la tablette dessine
+et voit se rejouer ce qui est dessous, mais ne réorganise pas la pile. Annuler
+et rétablir, en revanche, sont disponibles des deux côtés — c'est la tablette
+qui dessine, c'est elle qui doit pouvoir revenir en arrière.
 
 ## Enregistrer (REC)
 
@@ -82,9 +150,10 @@ cette prévisualisation.
   ne tombent pas sur des images du rush, et l'image figée en fin de plage peut
   être décalée d'une image. La cadence du projet se choisit à sa création :
   pour annoter un rush image par image, repartez d'un projet à sa cadence.
-- **Effacer pendant le REC** repart d'une toile vierge sans perdre
+- **Effacer pendant le REC** repart d'une couche vierge sans perdre
   l'enregistrement en cours : l'effacement devient un évènement de la
-  timeline, rejoué à l'export comme le reste.
+  timeline, rejoué à l'export comme le reste. Il ne touche que la couche
+  active ; les couches verrouillées rejouées dessous ne bougent pas.
 - **Avance image par image** (`❘◀` / `▶❘`) pour se positionner précisément
   hors REC.
 
@@ -106,9 +175,14 @@ cadrage (« Cadrage… » dans le bandeau média) propose :
 ## Enregistrer et rouvrir un projet (.lvn)
 
 Les deux boutons de la barre d'outils enregistrent et rechargent un projet :
-le tracé (sous forme de métadonnées, pas de pixels), le format du canevas, le
-fond, et de quoi retrouver le média — son chemin, la page si c'est un PDF, son
-cadrage et ses points IN/OUT.
+les couches et leurs traces (sous forme de métadonnées, pas de pixels), le
+format du canevas, le fond, et de quoi retrouver le média — son chemin, la page
+si c'est un PDF, son cadrage et ses points IN/OUT.
+
+Un projet enregistré avant les couches se rouvre sans rien perdre : son tracé
+devient la première couche. L'inverse n'est pas vrai — un projet enregistré
+maintenant ne s'ouvre pas dans une version antérieure de live_notes, qui le dit
+plutôt que de le charger à moitié.
 
 Rouvrir un projet rouvre donc le média tout seul, à son dernier emplacement
 connu, avec le cadrage et les bornes qui étaient les siens : le tracé retombe

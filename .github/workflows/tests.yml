@@ -1,0 +1,106 @@
+name: Bancs d'essai
+
+# Les bancs tournent sur le depot PUBLIC uniquement : le credit de minutes de
+# runner est epuise sur les depots prives, et un depot public dispose de
+# runners standard gratuits et illimites. Fichier identique dans live_notes
+# (prive) et live_notes-app (public), comme release.yml : tout comportement
+# qui diverge le fait via `github.repository`, jamais en dupliquant le fichier.
+# Cote prive, chaque job est donc « skipped » -- et un job skipped ne consomme
+# aucune minute.
+#
+# Aucun declencheur sur un tag : un tag ne declenche que release.yml, et les
+# deux workflows n'ont aucune intersection. Pousser une branche ici ne peut
+# donc pas produire de release.
+
+on:
+  push:
+    branches:
+      - public-main
+      # La branche d'essai publique, quel que soit son nom de travail : c'est
+      # la seule facon de mettre un etat a l'epreuve avant de le publier.
+      - banc-d-essai
+      - "claude/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Les bancs qui s'arretent au bord du navigateur : ils ne verifient que ce
+  # que le serveur repond. FFmpeg leur est indispensable -- test_export et
+  # test_colorspace encodent de vrais fichiers et les redecodent.
+  bancs:
+    if: github.repository == 'GanTiz/live_notes-app'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Installer FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Installer les dependances
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Espace colorimetrique
+        run: python test_colorspace.py
+
+      - name: Session et appairage tablette
+        run: python test_session.py
+
+      - name: Port et selecteur natif
+        run: python test_launch.py
+
+      - name: Proxys de rush et PDF
+        run: python test_proxy.py
+
+      - name: Couches d'export
+        run: python test_export.py
+
+  # Le parcours complet dans un vrai navigateur (Chrome DevTools Protocol).
+  # Separe des autres : il est long, et une panne de navigateur ne doit pas
+  # faire passer un echec de rendu pour un echec d'environnement.
+  navigateur:
+    if: github.repository == 'GanTiz/live_notes-app'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Installer FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Installer les dependances
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      # Sans navigateur, test_ui.py ne verifie rien et le dit -- mais il sort
+      # en 0. Le designer explicitement est ce qui distingue « le banc est
+      # passe » de « le banc n'a pas tourne ».
+      - name: Designer le navigateur
+        run: |
+          test -x /usr/bin/google-chrome
+          echo "LIVE_NOTES_CHROME=/usr/bin/google-chrome" >> "$GITHUB_ENV"
+          # `--no-proxy-server` : le banc fait dialoguer deux pages par l'adresse
+          # LAN de la machine (mode tablette). Un proxy sur le chemin rend ces
+          # deux bancs-la rouges pour une raison qui n'a rien du produit.
+          echo "LIVE_NOTES_CHROME_FLAGS=--no-sandbox --disable-dev-shm-usage --no-proxy-server --proxy-bypass-list=*" >> "$GITHUB_ENV"
+
+      - name: Interface, dans un vrai navigateur
+        run: python test_ui.py

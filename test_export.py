@@ -623,7 +623,126 @@ def test_an_image_media_lasts_as_long_as_the_stroke():
     return "%d images, comme le trace" % TRACE_FRAMES
 
 
+# ------------------------------------------------------------------ couches
+
+def band(color, horizontal, when, seed=1):
+    """Une bande franche, opaque, tracee d'un bout a l'autre du canevas.
+
+    Elle sert de mesure : sur un aplat opaque, le pixel du croisement dit sans
+    ambiguite laquelle des deux bandes est au-dessus.
+    """
+    if horizontal:
+        points = [{"x": 40 + index * 18, "y": HEIGHT // 2, "t": when + index * 4.0, "p": 1.0}
+                  for index in range(32)]
+    else:
+        points = [{"x": WIDTH // 2, "y": 30 + index * 10, "t": when + index * 4.0, "p": 1.0}
+                  for index in range(32)]
+    brush = {"shape": "round", "size": 26, "color": color, "opacity": 1.0,
+             "flow": 1.0, "hardness": 1.0, "spacing": 0.08}
+    return {"brush": brush, "seed": seed, "points": points}
+
+
+# La rouge est tracee TARD, la bleue TOT. A plat, la rouge passerait donc
+# par-dessus ; en couches, c'est la couche du dessus qui gagne, quel que soit
+# le moment ou chacune a ete tracee.
+RED_LATE = "#ff2020"
+BLUE_EARLY = "#2040ff"
+
+
+def crossing(frame):
+    """La couleur au croisement des deux bandes, en RGB 0..255."""
+    return frame[HEIGHT // 2, WIDTH // 2, :3]
+
+
+def test_layers_stack_in_order_not_in_time():
+    """Une trace du dessous posee APRES passe quand meme dessous.
+
+    C'est la seule propriete qui distingue de vraies couches d'un empilement
+    decoratif -- et celle qu'un rendu a plat, rejoue chronologiquement, rate
+    exactement a l'envers. Le banc verifie les deux : le resultat en couches,
+    et le fait que la meme chose a plat donne franchement l'inverse.
+    """
+    red = band(RED_LATE, True, 1200.0)          # couche du dessous, tracee tard
+    blue = band(BLUE_EARLY, False, 0.0)         # couche du dessus, tracee tot
+
+    layered = read(render("couches_ordre.mov", flatten="alpha", codec="prores4444",
+                          layers=[{"strokes": [red], "clears": []},
+                                  {"strokes": [blue], "clears": []}],
+                          strokes=[], durationMs=1800.0))[-1]
+    flat = read(render("couches_a_plat.mov", flatten="alpha", codec="prores4444",
+                       strokes=[blue, red], clears=[], durationMs=1800.0))[-1]
+
+    over = crossing(layered)
+    under = crossing(flat)
+    assert over[2] > over[0] + 40, \
+        ("au croisement, la couche du dessus ne passe pas dessus : %s"
+         % (over.astype(int).tolist(),))
+    assert under[0] > under[2] + 40, \
+        ("a plat, la trace posee en dernier devrait gagner : %s"
+         % (under.astype(int).tolist(),))
+    return ("croisement bleu en couches %s, rouge a plat %s"
+            % (over.astype(int).tolist(), under.astype(int).tolist()))
+
+
+def test_a_flat_payload_renders_exactly_as_one_layer():
+    """La forme d'avant les couches doit rendre au bit pres comme avant.
+
+    Un projet exporte par une version anterieure, ou un banc ecrit avant les
+    couches, ne doit rien changer a ce qui sort du tuyau.
+    """
+    flat = read(render("compat_a_plat.mov", flatten="alpha", codec="prores4444"))
+    one = read(render("compat_une_couche.mov", flatten="alpha", codec="prores4444",
+                      layers=[{"strokes": payload()["strokes"], "clears": []}],
+                      strokes=[]))
+    assert flat.shape == one.shape, "nombre d'images different : %s vs %s" % (flat.shape, one.shape)
+    ecart = float(np.abs(flat - one).max())
+    assert ecart == 0.0, "ecart maximal de %.1f entre les deux formes" % ecart
+    return "%d images identiques au bit pres" % flat.shape[0]
+
+
+def test_a_clear_only_wipes_its_own_layer():
+    """Un effacement remet a zero SA couche, pas la pile.
+
+    Sans quoi effacer la couche 2 en cours d'enregistrement emporterait la
+    couche 1 verrouillee -- exactement ce que les couches servent a eviter.
+    """
+    red = band(RED_LATE, True, 0.0)
+    blue = band(BLUE_EARLY, False, 0.0)
+    # La couche du dessous s'efface a mi-parcours, celle du dessus jamais.
+    frames = read(render("couches_effacement.mov", flatten="alpha", codec="prores4444",
+                         layers=[{"strokes": [red], "clears": [400.0]},
+                                 {"strokes": [blue], "clears": []}],
+                         strokes=[], durationMs=1200.0))
+    last = frames[-1]
+    # Loin du croisement : la bande rouge seule.
+    red_alone = last[HEIGHT // 2, 80, 3]
+    blue_alone = last[40, WIDTH // 2, 3]
+    assert red_alone < 8, "la bande effacee est toujours la (alpha %.0f)" % red_alone
+    assert blue_alone > 200, "la bande de l'autre couche a ete emportee (alpha %.0f)" % blue_alone
+    return "couche du dessous effacee, couche du dessus intacte"
+
+
+def test_an_empty_layer_changes_nothing():
+    """Une couche sans trace -- jamais dessinee, ou masquee donc jamais envoyee --
+    ne coute ni canevas ni pixel."""
+    alone = read(render("couches_seule.mov", flatten="alpha", codec="prores4444",
+                        layers=[{"strokes": payload()["strokes"], "clears": []}],
+                        strokes=[]))
+    padded = read(render("couches_vide.mov", flatten="alpha", codec="prores4444",
+                         layers=[{"strokes": [], "clears": []},
+                                 {"strokes": payload()["strokes"], "clears": []},
+                                 {"strokes": [], "clears": []}],
+                         strokes=[]))
+    ecart = float(np.abs(alone - padded).max())
+    assert ecart == 0.0, "ecart maximal de %.1f" % ecart
+    return "deux couches vides autour : aucun effet"
+
+
 TESTS = [
+    test_layers_stack_in_order_not_in_time,
+    test_a_flat_payload_renders_exactly_as_one_layer,
+    test_a_clear_only_wipes_its_own_layer,
+    test_an_empty_layer_changes_nothing,
     test_the_stroke_alone_keeps_its_alpha,
     test_a_solid_background_ignores_the_media,
     test_the_media_is_flattened_under_the_stroke,

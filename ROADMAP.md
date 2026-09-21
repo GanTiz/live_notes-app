@@ -20,6 +20,18 @@
   timecode de départ.
 - Contrôle par tablette (appairage QR code, transfert de rôle, relais des
   gestes en temps réel).
+- Couches de dessin : verrouiller une prise et travailler par-dessus, les
+  couches verrouillées se rejouant animées sous le stylet. Une couche se
+  masque (elle quitte alors aussi l'export) ou se supprime, la première comme
+  la troisième.
+- Annuler / rétablir (`Ctrl + Z`, `Ctrl + Maj + Z`) — sans limite de nombre,
+  la profondeur étant la couche active.
+- Zoom au pincement à deux doigts sur écran tactile, déplacement compris.
+- Raccourcis clavier et souris : taille et dureté du pinceau au glisser,
+  gomme à la volée (`E`), zoom au pincement du pavé tactile et à `Ctrl` +
+  molette, déplacement à la barre d'espace, export à `Ctrl + Alt + E`.
+- Bancs d'essai en intégration continue (sur le dépôt public, où les runners
+  sont gratuits) : six bancs, du colorimétrique au parcours navigateur complet.
 - Pipeline de build desktop (Windows/macOS) — voir
   [l'état de validation](docs/DEVELOPMENT.md#état-de-validation) avant de le
   considérer prêt pour une release publique.
@@ -33,11 +45,15 @@
 
 ## À faire
 
-- Gestion de calques multiples pour le dessin.
-- Undo/redo pour le dessin.
-- Raccourcis clavier (taille du pinceau via `[` / `]`, changement de brosse).
-- Zoom au trackpad (pincement) et déplacement à la barre d'espace, en
-  complément du clic molette.
+- Édition fine d'une couche : entrer dedans, supprimer une trace précise,
+  décaler une couche ou une trace dans le temps, en changer la vitesse.
+- Export pro avec **une couche de dessin par fichier**, dans la continuité de
+  l'export en trois couches existant.
+- Gestion des couches depuis la tablette (aujourd'hui le poste structure, la
+  tablette dessine).
+- Renommer une couche.
+- Raccourcis clavier restants : taille du pinceau via `[` / `]`, changement
+  de brosse au clavier.
 - Repères de zone sûre / grille optionnels sur le canevas.
 - Vérification du contraste et de la navigation au clavier sur l'ensemble
   des contrôles.

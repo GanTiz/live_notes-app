@@ -1114,7 +1114,8 @@ def _export_plan(payload, directory, media):
 @pc_only
 def api_export():
     payload = request.get_json(silent=True) or {}
-    if not payload.get("strokes"):
+    # Les couches, ou -- charge d'avant les couches -- les traces a plat.
+    if not any(sheet["strokes"] for sheet in renderer.payload_sheets(payload)):
         return jsonify({"error": "Aucun trace a exporter."}), 400
 
     raw_directory = (payload.get("directory") or "").strip()

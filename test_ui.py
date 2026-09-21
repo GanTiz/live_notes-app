@@ -1008,7 +1008,13 @@ def captured_export(page):
         "  var data = window.__exported;"
         "  if (!data) return '';"
         "  var gap = 0, last = 0, first = null;"
-        "  data.strokes.forEach(function (item) {"
+        # La charge porte des couches ; une charge a plat reste lisible, c'est
+        # celle que produisaient les versions d'avant.
+        "  var strokes = [];"
+        "  (data.layers || [{strokes: data.strokes || []}]).forEach(function (sheet) {"
+        "    strokes = strokes.concat(sheet.strokes || []);"
+        "  });"
+        "  strokes.forEach(function (item) {"
         # Le trou se mesure *dans* un trace, entre deux points consecutifs : le
         # silence qui precede le premier point n'en est pas un.
         "    var previous = null;"
@@ -1019,7 +1025,7 @@ def captured_export(page):
         "      if (point.t > last) last = point.t;"
         "    });"
         "  });"
-        "  return [data.strokes.length, first === null ? -1 : first, last, gap,"
+        "  return [strokes.length, first === null ? -1 : first, last, gap,"
         "          data.durationMs].join(',');"
         "})()")
     page.js("window.fetch = window.__realFetch;"
@@ -1126,6 +1132,368 @@ def test_a_stroke_across_the_out_point_reaches_the_pc_whole(ctx):
          % (got["duration"], got["last"]))
     return ("trait continu de %.0f ms recu entier, %.0f ms au-dela du OUT ;"
             " aucune image au-dela de la 62" % (got["last"], beyond))
+
+
+# ------------------------------------------------------ couches & historique
+
+def canvas_ink(page):
+    """Combien d'encre le canevas porte, toutes couches composees.
+
+    La mesure passe par une reduction a 160 x 90 : lire les huit millions de
+    composantes d'un canevas HD depasse le budget d'une evaluation, et on
+    cherche une difference franche entre « le trait est la » et « il n'y est
+    plus », pas une empreinte exacte.
+    """
+    return int(page.js("""(function () {
+      var node = document.getElementById('drawing-canvas');
+      var small = document.createElement('canvas');
+      small.width = 160; small.height = 90;
+      var ctx = small.getContext('2d');
+      ctx.drawImage(node, 0, 0, small.width, small.height);
+      var data = ctx.getImageData(0, 0, small.width, small.height).data;
+      var count = 0;
+      for (var i = 3; i < data.length; i += 4) if (data[i] > 8) count += 1;
+      return count;
+    })()""", wait=2.5))
+
+
+def draw_stroke(page, y_ratio, from_x=0.25, to_x=0.65):
+    """Un trait pose puis leve : une trace, au sens du projet."""
+    box = page.js("(function () {"
+                  "  var r = document.getElementById('drawing-canvas')"
+                  "    .getBoundingClientRect();"
+                  "  return [r.left, r.top, r.width, r.height].join(',');"
+                  "})()")
+    left, top, width, height = [float(value) for value in box.split(",")]
+    y = top + height * y_ratio
+    x0 = left + width * from_x
+    x1 = left + width * to_x
+
+    page.input("Input.dispatchMouseEvent", type="mousePressed", x=x0, y=y,
+               button="left", buttons=1, clickCount=1)
+    for step in range(1, 9):
+        page.input("Input.dispatchMouseEvent", type="mouseMoved",
+                   x=x0 + (x1 - x0) * step / 8.0, y=y, button="left", buttons=1)
+    page.input("Input.dispatchMouseEvent", type="mouseReleased", x=x1, y=y,
+               button="left", buttons=0, clickCount=1)
+    page.pump(0.35)
+
+
+def exported_layers(page):
+    """Le nombre de traces par couche, tel que l'export les recevrait."""
+    # `alert()` bloque le moteur de rendu tant que personne ne la referme, et le
+    # banc n'a pas de main pour cela : plus aucune evaluation ne repondrait --
+    # ni ici, ni dans aucun banc suivant.
+    page.js("window.__alerts = [];"
+            "window.__realAlert = window.__realAlert || window.alert;"
+            "window.alert = function (text) { window.__alerts.push(text); };")
+    page.js("window.__exported = null;"
+            "window.__realFetch = window.__realFetch || window.fetch;"
+            "window.fetch = function (url, options) {"
+            "  if (String(url).indexOf('/api/export') === 0 && options && options.body) {"
+            "    window.__exported = JSON.parse(options.body);"
+            "    return Promise.resolve(new Response('{\"error\": \"banc\"}',"
+            "      {status: 200, headers: {'Content-Type': 'application/json'}}));"
+            "  }"
+            "  return window.__realFetch.apply(window, arguments);"
+            "};")
+    page.click("btn-export")
+    page.pump(0.4)
+    page.click("export-go")
+    page.pump(1.0)
+    raw = page.js("(function () {"
+                  "  var data = window.__exported;"
+                  "  if (!data || !data.layers) return '';"
+                  "  return data.layers.map(function (sheet) {"
+                  "    return sheet.strokes.length;"
+                  "  }).join(',');"
+                  "})()")
+    page.js("window.fetch = window.__realFetch;"
+            "window.alert = window.__realAlert;")
+    assert raw, ("l'export n'a pas ete declenche : rien a mesurer (etat « %s »)"
+                 % page.text("status"))
+    return [int(value) for value in raw.split(",")]
+
+
+def fresh_layer(page):
+    """Une couche vide et active, pour partir de quelque chose de connu."""
+    page.click("btn-layer-add")
+    page.pump(0.3)
+
+
+def test_undo_takes_the_stroke_off_the_canvas_and_out_of_the_payload(ctx):
+    """Annuler retire la trace des pixels ET des metadonnees.
+
+    Un masquage aurait la meme allure a l'ecran et ressortirait a l'export :
+    c'est la charge utile qui fait foi.
+    """
+    page = ctx["page"]
+    fresh_layer(page)
+    draw_stroke(page, 0.35)
+    one = canvas_ink(page)
+    draw_stroke(page, 0.62)
+    two = canvas_ink(page)
+    assert two > one, "le second trait n'a pas ete pose (%d puis %d)" % (one, two)
+
+    page.click("btn-undo")
+    page.pump(0.5)
+    undone = canvas_ink(page)
+    assert undone < two - (two - one) * 0.5, \
+        "le trait annule est toujours a l'ecran (%d, attendu ~%d)" % (undone, one)
+    assert exported_layers(page)[-1] == 1, "la trace annulee est encore dans la charge"
+
+    page.click("btn-redo")
+    page.pump(0.5)
+    again = canvas_ink(page)
+    assert again > undone, "le trait retabli n'est pas revenu a l'ecran"
+    assert exported_layers(page)[-1] == 2, "la trace retablie manque dans la charge"
+
+    # Une nouvelle trace referme l'avenir : plus rien a retablir.
+    page.click("btn-undo")
+    page.pump(0.4)
+    draw_stroke(page, 0.5)
+    assert page.js("document.getElementById('btn-redo').disabled + ''") == "true", \
+        "la pile de retablissement a survecu a une nouvelle trace"
+    return "annulation et retablissement, a l'ecran comme dans la charge"
+
+
+def test_recording_only_wipes_the_active_layer(ctx):
+    """REC repart de zero sur la couche active, et sur elle seule.
+
+    C'est tout l'objet des couches : jusqu'ici, appuyer sur REC appelait
+    clearAll() et coutait la prise entiere.
+    """
+    page = ctx["page"]
+    fresh_layer(page)
+    draw_stroke(page, 0.3)
+    page.click("btn-layer-new")       # verrouille, et pose une couche par-dessus
+    page.pump(0.4)
+    draw_stroke(page, 0.7)
+    before = exported_layers(page)
+    assert before[-2:] == [1, 1], "les deux couches n'ont pas une trace chacune : %s" % before
+
+    page.click("btn-rec")
+    assert page.wait_for("document.body.classList.contains('recording')", timeout=12.0), \
+        "l'enregistrement n'a pas demarre"
+    page.click("btn-stop")
+    assert page.wait_for("!document.body.classList.contains('recording')", timeout=8.0), \
+        "l'enregistrement ne s'est pas arrete"
+    page.pump(0.5)
+
+    after = exported_layers(page)
+    assert after[-2] == 1, "la couche verrouillee a ete emportee par le REC : %s" % after
+    assert after[-1] == 0, "la couche active n'a pas ete videe par le REC : %s" % after
+    return "REC vide la couche active, la verrouillee est intacte"
+
+
+def write_project(path, data):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    return path
+
+
+def test_a_v1_project_opens_as_a_single_layer(ctx):
+    """Un projet d'avant les couches s'ouvre sans rien perdre.
+
+    Et un projet a couches se relit avec les siennes. Les deux passent par le
+    meme chemin de chargement : c'est lui qu'on met a l'epreuve.
+    """
+    page = ctx["page"]
+    brush = {"shape": "round", "size": 18, "color": "#111111", "opacity": 1.0,
+             "flow": 1.0, "hardness": 0.8, "spacing": 0.1}
+
+    def trace(offset):
+        return {"brush": brush, "seed": 3, "points": [
+            {"x": 200 + index * 20, "y": 300 + offset, "t": index * 30.0, "p": 0.8}
+            for index in range(12)]}
+
+    config = {"width": 1920, "height": 1080, "fps": 25, "alpha": True,
+              "background": "#ffffff"}
+
+    old = write_project(os.path.join(TMP, "ancien.lvn"), {
+        "format": "live_notes", "version": 1, "config": config,
+        "strokes": [trace(0), trace(60)], "clears": [], "durationMs": 900,
+        "media": None, "inPoint": None, "outPoint": None})
+
+    page.attach_file("project-input", old)
+    assert page.wait_for("getComputedStyle(document.getElementById('project-loading'))"
+                         ".display === 'none'", timeout=20.0), \
+        "le chargement du projet v1 ne s'est pas termine"
+    page.pump(0.6)
+    assert exported_layers(page) == [2], \
+        "un projet v1 devrait donner une seule couche de deux traces"
+    assert page.js("document.getElementById('tab-layers-count').textContent") == "1", \
+        "l'onglet n'annonce pas une seule couche"
+
+    recent = write_project(os.path.join(TMP, "couches.lvn"), {
+        "format": "live_notes", "version": 2, "config": config,
+        "layers": [
+            {"id": 1, "name": "Fond", "visible": True,
+             "strokes": [trace(0)], "clears": [], "durationMs": 400},
+            {"id": 2, "name": "Ajouts", "visible": True,
+             "strokes": [trace(60), trace(120)], "clears": [], "durationMs": 900},
+        ],
+        "activeLayer": 2, "durationMs": 900,
+        "media": None, "inPoint": None, "outPoint": None})
+
+    page.attach_file("project-input", recent)
+    assert page.wait_for("getComputedStyle(document.getElementById('project-loading'))"
+                         ".display === 'none'", timeout=20.0), \
+        "le chargement du projet v2 ne s'est pas termine"
+    page.pump(0.6)
+    assert exported_layers(page) == [1, 2], "les couches du projet v2 ne sont pas revenues"
+    assert page.js("document.getElementById('tab-layers-count').textContent") == "2", \
+        "l'onglet n'annonce pas deux couches"
+
+    # Une version future se reconnait comme telle, au lieu de passer pour un
+    # fichier casse -- l'un demande une mise a jour, l'autre un autre fichier.
+    future = write_project(os.path.join(TMP, "futur.lvn"), {
+        "format": "live_notes", "version": 99, "config": config, "layers": []})
+    page.attach_file("project-input", future)
+    page.pump(0.8)
+    assert "plus récente" in page.text("status"), \
+        "un projet trop recent n'est pas annonce comme tel : %r" % page.text("status")
+    return "v1 en une couche, v2 avec les siennes, version future annoncee"
+
+
+def test_a_hidden_layer_leaves_the_payload(ctx):
+    """L'oeil retire la couche de l'ecran ET du fichier livre : une seule
+    notion, pas deux cases qui pourraient se contredire."""
+    page = ctx["page"]
+    fresh_layer(page)
+    draw_stroke(page, 0.4)
+    page.click("btn-layer-new")
+    page.pump(0.4)
+    draw_stroke(page, 0.75)
+    with_both = canvas_ink(page)
+    counts = exported_layers(page)
+    assert counts[-2:] == [1, 1], "deux couches d'une trace attendues : %s" % counts
+
+    # La couche active ne se masque pas : on ne dessine pas a l'aveugle.
+    page.js("(function () {"
+            "  document.querySelector('#layer-list .layer-row button').click();"
+            "})()")
+    page.pump(0.4)
+    assert canvas_ink(page) == with_both, "la couche active a ete masquee"
+    assert "avant de masquer" in page.text("status"), \
+        "masquer la couche active n'est pas refuse : %r" % page.text("status")
+
+    # L'oeil de la couche verrouillee, juste dessous dans la liste.
+    page.js("(function () {"
+            "  document.querySelectorAll('#layer-list .layer-row')[1]"
+            "    .querySelector('button').click();"
+            "})()")
+    page.pump(0.5)
+    # Lu avant tout export : ouvrir la fenetre de rendu reecrit la ligne d'etat.
+    said = page.text("status")
+    hidden_ink = canvas_ink(page)
+    assert hidden_ink < with_both, "la couche masquee est toujours a l'ecran"
+    assert "masqu" in said, "rien ne dit qu'une couche est masquee : %r" % said
+    after = exported_layers(page)
+    assert len(after) == len(counts) - 1, \
+        "la couche masquee est encore dans la charge d'export : %s" % after
+    assert after[-1] == 1, "ce n'est pas la bonne couche qui est partie : %s" % after
+    assert "masqu" in page.js("document.getElementById('export-layers-note').textContent"), \
+        "la fenetre d'export ne previent pas qu'une couche est masquee"
+
+    page.js("(function () {"
+            "  document.querySelectorAll('#layer-list .layer-row')[1]"
+            "    .querySelector('button').click();"
+            "})()")
+    page.pump(0.4)
+    return "une couche masquee quitte l'ecran et la charge ; l'active ne se masque pas"
+
+
+def stage_width(page):
+    """Largeur reelle du cadre a l'ecran : la mesure du zoom, vue du dehors."""
+    return float(page.js("document.getElementById('media-container')"
+                         ".getBoundingClientRect().width + ''"))
+
+
+def test_a_pinch_zooms_the_canvas_and_never_draws(ctx):
+    """Deux doigts qui s'ecartent zooment, et n'ecrivent rien.
+
+    Le pincement du pave tactile arrive deja cuit sur un poste -- le navigateur
+    le presente comme une molette avec `ctrlKey`. Sur une tablette, rien ne
+    l'annonce : il faut le suivre doigt par doigt. Et deux doigts veulent
+    naviguer : le trait que le premier avait commence est abandonne, jamais
+    enregistre.
+    """
+    page = ctx["page"]
+    page.call("Emulation.setTouchEmulationEnabled", enabled=True, maxTouchPoints=5)
+    try:
+        fresh_layer(page)
+        page.js("document.getElementById('zoom-fit').click();")
+        page.pump(0.4)
+        before = stage_width(page)
+
+        box = page.js("(function () {"
+                      "  var r = document.getElementById('drawing-canvas')"
+                      "    .getBoundingClientRect();"
+                      "  return [r.left + r.width / 2, r.top + r.height / 2].join(',');"
+                      "})()")
+        cx, cy = [float(value) for value in box.split(",")]
+
+        # Un doigt se pose et glisse : sans le second, ce serait un trait.
+        page.input("Input.dispatchTouchEvent", type="touchStart",
+                   touchPoints=[{"x": cx - 30, "y": cy, "id": 1}])
+        page.input("Input.dispatchTouchEvent", type="touchMove",
+                   touchPoints=[{"x": cx - 40, "y": cy, "id": 1}])
+        # Le second arrive : le trait est abandonne, le pincement commence.
+        page.input("Input.dispatchTouchEvent", type="touchStart",
+                   touchPoints=[{"x": cx - 40, "y": cy, "id": 1},
+                                {"x": cx + 40, "y": cy, "id": 2}])
+        for step in range(1, 7):
+            spread = 40 + step * 24
+            page.input("Input.dispatchTouchEvent", type="touchMove",
+                       touchPoints=[{"x": cx - spread, "y": cy, "id": 1},
+                                    {"x": cx + spread, "y": cy, "id": 2}])
+        page.input("Input.dispatchTouchEvent", type="touchEnd", touchPoints=[])
+        page.pump(0.5)
+
+        after = stage_width(page)
+        assert after > before * 1.15, \
+            "le pincement n'a pas zoome (%.0f px puis %.0f px)" % (before, after)
+        assert exported_layers(page)[-1] == 0, \
+            "le trait commence avant le second doigt a ete enregistre"
+
+        page.js("document.getElementById('zoom-fit').click();")
+        page.pump(0.3)
+    finally:
+        page.call("Emulation.setTouchEmulationEnabled", enabled=False)
+    return "pincement : %.0f px -> %.0f px, aucune trace posee" % (before, after)
+
+
+def tap_space(page):
+    page.input("Input.dispatchKeyEvent", type="keyDown", code="Space", key=" ",
+               windowsVirtualKeyCode=32, nativeVirtualKeyCode=32)
+    page.input("Input.dispatchKeyEvent", type="keyUp", code="Space", key=" ",
+               windowsVirtualKeyCode=32, nativeVirtualKeyCode=32)
+    page.pump(0.6)
+
+
+def test_space_still_plays_and_pauses(ctx):
+    """Espace reste la lecture / pause du bus, malgre le mode main.
+
+    Espace maintenu + clic passe en mode main : la bascule du lecteur se joue
+    donc au relachement, et seulement si personne ne s'en est servi entre-temps.
+    Un appui simple doit continuer de jouer et de mettre en pause.
+    """
+    page = ctx["page"]
+    open_on_server(ctx, ctx["rush_open_long"])
+    assert page.wait_for("!!window.MediaTransport && window.MediaTransport.isTimed()",
+                         timeout=25.0), "le rush n'est pas pret"
+    assert page.js("document.getElementById('bg-media').paused + ''") == "true", \
+        "le rush joue deja : l'appui ne prouverait rien"
+
+    tap_space(page)
+    assert page.wait_for("!document.getElementById('bg-media').paused", timeout=6.0), \
+        "un appui sur Espace n'a pas lance la lecture"
+
+    tap_space(page)
+    assert page.wait_for("document.getElementById('bg-media').paused", timeout=6.0), \
+        "un second appui sur Espace n'a pas mis en pause"
+    return "Espace joue puis met en pause"
 
 
 def test_the_tablet_buttons_are_not_deaf_to_the_finger(ctx):
@@ -1281,6 +1649,12 @@ TESTS = [
     test_a_late_player_clock_never_shows_the_image_after_the_out,
     test_a_rush_off_the_project_cadence_says_so,
     test_a_stroke_across_the_out_point_reaches_the_pc_whole,
+    test_undo_takes_the_stroke_off_the_canvas_and_out_of_the_payload,
+    test_recording_only_wipes_the_active_layer,
+    test_a_hidden_layer_leaves_the_payload,
+    test_a_v1_project_opens_as_a_single_layer,
+    test_a_pinch_zooms_the_canvas_and_never_draws,
+    test_space_still_plays_and_pauses,
     test_the_tablet_buttons_are_not_deaf_to_the_finger,
     test_the_toolbar_holds_on_one_row,
     test_the_tool_buttons_keep_their_icon,

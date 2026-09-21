@@ -18,8 +18,19 @@
   var config = { width: 1920, height: 1080, fps: 25, alpha: true, background: '#ffffff' };
   var ready = false;
 
-  var strokes = [];
-  var clears = [];
+  /* Couches de dessin. `layers[0]` est au fond, la dernière au premier plan ;
+   * `activeId` désigne la seule qui reçoive des traces.
+   *
+   * « Verrouillée » et « pas active » sont la même chose : il y a toujours
+   * exactement une couche déverrouillée, et c'est l'active — un seul état à
+   * tenir, au lieu d'un cadenas par couche à garder cohérent avec lui.
+   *
+   * Une couche n'a pas d'horloge à elle : le `t` de ses traces compte depuis
+   * le point IN du média, comme partout ailleurs. C'est ce qui permet
+   * d'ajouter un trait « à la douzième seconde » sur une prise déjà faite. */
+  var layers = [];
+  var activeId = 0;
+  var layerSeq = 0;
   var currentBrush = null;
   var library = { presets: [], userPresets: [] };
 
@@ -55,9 +66,10 @@
   var recordedDuration = 0;
 
   var previewing = false;
-  var previewActive = [];
-  var previewQueue = [];
-  var previewClears = [];
+  /* Rejeu en cours (prévisualisation, ou couches verrouillées pendant le REC),
+   * ou null. Voir « Rejeu ». */
+  var replay = null;
+  var recFrame = null;
   var previewStart = 0;
   var previewFrame = null;
   var previewDuration = 0;
@@ -251,9 +263,13 @@
     brushTools.appendChild(colorField);
     brushTools.appendChild(bgField);
 
-    ['btn-clear', 'btn-rec', 'btn-stop', 'btn-preview'].forEach(function (id) {
-      controlHost.appendChild($(id));
-    });
+    // Annuler et rétablir suivent le stylet : c'est la tablette qui dessine,
+    // c'est elle qui doit pouvoir revenir en arrière — et elle n'a pas de
+    // Ctrl + Z sous la main.
+    ['btn-undo', 'btn-redo', 'btn-clear', 'btn-rec', 'btn-stop', 'btn-preview']
+      .forEach(function (id) {
+        controlHost.appendChild($(id));
+      });
 
     $('transport').classList.remove('collapsed');
     $('tablet-brush-toggle').addEventListener('click', function (event) {
@@ -665,6 +681,175 @@
     return wrapper;
   }
 
+  /* Deux onglets dans le panneau de droite : le pinceau se règle, les couches
+   * se rangent. Le panneau reste repliable comme avant — l'onglet replié
+   * affiche le nom de celui qui est ouvert. */
+  var panelTab = 'brush';
+
+  function setPanelTab(name) {
+    if (isTablet) name = 'brush';
+    panelTab = name;
+    var onLayers = name === 'layers';
+    $('tab-brush').setAttribute('aria-selected', onLayers ? 'false' : 'true');
+    $('tab-layers').setAttribute('aria-selected', onLayers ? 'true' : 'false');
+    $('pane-brush').style.display = onLayers ? 'none' : '';
+    $('pane-layers').style.display = onLayers ? '' : 'none';
+    $('panel-tab-label').textContent = onLayers ? 'Couches' : 'Pinceau';
+    if (onLayers) {
+      $('panel-title').textContent = 'Couches';
+      $('panel-hint').textContent = layers.length > 1
+        ? 'Une seule couche reçoit les traces : celle qui est active.'
+        : 'Verrouille la couche courante et ajoute par-dessus.';
+      syncLayerPanel();
+    } else {
+      syncPanel();
+    }
+  }
+
+  $('tab-brush').addEventListener('click', function () { setPanelTab('brush'); });
+  $('tab-layers').addEventListener('click', function () { setPanelTab('layers'); });
+
+  /** Dessine la liste des couches. Le premier plan en haut, comme partout. */
+  function syncLayerPanel() {
+    var host = $('layer-list');
+    if (!host) return;
+    $('tab-layers-count').textContent = String(layers.length);
+    host.textContent = '';
+
+    // Premier plan en haut : on lit une pile du dessus.
+    layers.slice().reverse().forEach(function (layer) {
+      var row = document.createElement('div');
+      row.className = 'layer-row'
+        + (layer.id === activeId ? ' is-active' : '')
+        + (layer.visible ? '' : ' is-hidden');
+
+      var eye = document.createElement('button');
+      eye.type = 'button';
+      eye.className = 'btn-icon';
+      eye.textContent = layer.visible ? '👁' : '⃠';
+      eye.title = (layer.visible ? 'Masquer ' : 'Afficher ') + layer.name
+        + ' — une couche masquée ne s’exporte pas';
+      eye.setAttribute('aria-label', eye.title);
+      eye.addEventListener('click', function () { toggleLayer(layer.id); });
+      row.appendChild(eye);
+
+      var pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'layer-pick';
+      pick.setAttribute('aria-label', 'Rendre ' + layer.name + ' active');
+      var name = document.createElement('span');
+      name.className = 'layer-name';
+      name.textContent = layer.name;
+      var meta = document.createElement('span');
+      meta.className = 'layer-meta';
+      meta.textContent = layer.strokes.length + ' tracé(s)'
+        + (layer.id === activeId ? ' · active' : '')
+        + (layer.durationMs ? ' · ' + (layer.durationMs / 1000).toFixed(1) + ' s' : '');
+      pick.appendChild(name);
+      pick.appendChild(meta);
+      pick.addEventListener('click', function () { setActiveLayer(layer.id); });
+      row.appendChild(pick);
+
+      if (layer.id !== activeId) {
+        var lock = document.createElement('span');
+        lock.className = 'layer-lock';
+        lock.textContent = '🔒';
+        lock.title = 'Verrouillée — cliquer son nom pour y revenir';
+        row.appendChild(lock);
+      }
+
+      var kill = document.createElement('button');
+      kill.type = 'button';
+      kill.className = 'btn-icon';
+      kill.textContent = '🗑';
+      kill.title = 'Supprimer ' + layer.name;
+      kill.setAttribute('aria-label', kill.title);
+      kill.addEventListener('click', function () { removeLayer(layer.id); });
+      row.appendChild(kill);
+
+      host.appendChild(row);
+    });
+  }
+
+  /* Le geste central : verrouiller ce qu'on vient de faire, et poser une
+   * couche vide par-dessus. Un seul bouton, parce que c'est un seul geste —
+   * verrouiller sans ajouter ne laisserait nulle part où dessiner. */
+  function addLayer() {
+    if (isTablet || !ready) return;
+    if (recording) { status('Terminer l’enregistrement avant d’ajouter une couche.'); return; }
+    stopPreview();
+    var layer = makeLayer();
+    layers.push(layer);
+    activeId = layer.id;
+    bindActiveLayer();
+    scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
+    // Une couche vide n'a pas d'enregistrement à elle : l'origine des temps se
+    // repose au prochain REC.
+    t0 = null;
+    lastElapsed = 0;
+    syncLayerPanel();
+    syncHistoryButtons();
+    requestRedraw();
+    updateExportState();
+    emit({ t: 'layers', list: layerState(), activeId: activeId });
+    status(layer.name + ' ajoutée — les couches du dessous sont verrouillées.');
+  }
+
+  function toggleLayer(id) {
+    var layer = layerById(id);
+    if (!layer) return;
+    // Masquer la couche qui reçoit les traces reviendrait à dessiner sans rien
+    // voir arriver : le geste est refusé, et la ligne d'état dit quoi faire.
+    if (layer.id === activeId && layer.visible) {
+      status('Rendre une autre couche active avant de masquer « ' + layer.name + ' ».');
+      return;
+    }
+    layer.visible = !layer.visible;
+    syncLayerPanel();
+    requestRedraw();
+    updateExportState();
+    emit({ t: 'layers', list: layerState(), activeId: activeId });
+    status(layer.name + (layer.visible ? ' affichée.' : ' masquée — elle ne s’exportera pas.'));
+  }
+
+  function removeLayer(id) {
+    var layer = layerById(id);
+    if (!layer || isTablet) return;
+    if (recording) { status('Terminer l’enregistrement avant de supprimer une couche.'); return; }
+    // Supprimer n'est pas annulable : l'historique porte sur les gestes de
+    // dessin, pas sur la structure du projet. La confirmation est le garde-fou.
+    if (layer.strokes.length && !window.confirm(
+      'Supprimer « ' + layer.name + ' » et ses ' + layer.strokes.length + ' tracé(s) ?')) return;
+    stopPreview();
+    // Il y a toujours au moins une couche : la dernière se vide au lieu de
+    // disparaître, sans quoi il n'y aurait plus où dessiner.
+    if (layers.length === 1) {
+      setActiveLayer(layer.id, true);
+      clearActiveLayer();
+    } else {
+      layers = layers.filter(function (item) { return item !== layer; });
+      if (activeId === id) {
+        activeId = layers[layers.length - 1].id;
+        bindActiveLayer();
+      }
+    }
+    syncLayerPanel();
+    syncHistoryButtons();
+    requestRedraw();
+    updateExportState();
+    emit({ t: 'layers', list: layerState(), activeId: activeId });
+    status(layer.name + ' supprimée.');
+  }
+
+  $('btn-layer-add').addEventListener('click', addLayer);
+  $('btn-layer-new').addEventListener('click', function () {
+    addLayer();
+    setPanelTab('layers');
+    setPanelCollapsed(false);
+  });
+  $('btn-undo').addEventListener('click', function () { undo(); });
+  $('btn-redo').addEventListener('click', function () { redo(); });
+
   /* Le panneau se replie en onglet : le plan de travail récupère la largeur,
    * et le ResizeObserver réajuste l'image toute seule. */
   var PANEL_KEY = 'live_notes.panelCollapsed';
@@ -693,6 +878,7 @@
   else {
     try { setPanelCollapsed(localStorage.getItem(PANEL_KEY) === '1'); } catch (e) { /* ignore */ }
   }
+  setPanelTab('brush');
 
   function buildPanel() {
     var host = $('panel-params');
@@ -716,10 +902,14 @@
   function syncPanel() {
     var brush = shortcutBrush();
     if (!brush) return;
-    $('panel-title').textContent = currentBrush.name || 'Pinceau';
-    $('panel-hint').textContent = brush.eraser
-      ? 'Gomme — la couleur est ignorée.'
-      : 'Les réglages s’appliquent au pinceau sélectionné.';
+    // L'en-tête appartient à l'onglet ouvert : écrire le nom du pinceau
+    // pendant qu'on range ses couches le remplacerait sous les doigts.
+    if (panelTab === 'brush') {
+      $('panel-title').textContent = currentBrush.name || 'Pinceau';
+      $('panel-hint').textContent = brush.eraser
+        ? 'Gomme — la couleur est ignorée.'
+        : 'Les réglages s’appliquent au pinceau sélectionné.';
+    }
 
     widgets.forEach(function (widget) {
       if (widget.node.dataset.shapes) {
@@ -1159,6 +1349,393 @@
     $('media-container').classList.add('panning');
   }
 
+  /* ------------------------------ Couches verrouillées pendant le REC */
+
+  /* Pendant qu'on enregistre la couche 2, la couche 1 se rejoue animée,
+   * dessous, calée sur le média. C'est ce qui permet de poser un trait au bon
+   * moment sur une prise déjà faite — sans ça, on dessinerait à l'aveugle
+   * au-dessus d'une image figée. */
+
+  function startUnderlay() {
+    var others = layers.filter(function (layer) {
+      return layer !== activeLayer() && layer.visible && layer.strokes.length;
+    });
+    // Le rejeu repart de zéro : leurs canevas doivent partir vides, sans quoi
+    // l'état final resterait affiché par-dessus le rejeu naissant.
+    others.forEach(function (layer) {
+      layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+    });
+    replay = others.length ? makeReplay(others) : null;
+    requestRedraw();
+  }
+
+  function stopUnderlay() {
+    if (recFrame) cancelAnimationFrame(recFrame);
+    recFrame = null;
+    if (!replay) return;
+    replay = null;
+    // Les couches rejouées sont peut-être arrêtées en plein milieu : on les
+    // remet dans leur état final, celui qu'elles ont vraiment.
+    layers.forEach(function (layer) {
+      if (layer !== activeLayer()) rebuildLayer(layer);
+    });
+    requestRedraw();
+  }
+
+  /** L'instant courant du REC, sans jamais poser l'origine. `elapsed()` la
+   *  pose quand elle manque, ce qui est juste pour un point tracé mais faux
+   *  ici : l'origine doit rester la première image du rush, pas la première
+   *  image d'animation qui passe. */
+  function recElapsed() {
+    return t0 === null ? 0 : Math.max(0, performance.now() - t0);
+  }
+
+  function recTick() {
+    if (!recording || !replay) { recFrame = null; return; }
+    // Le stylet est prioritaire : on ne recompose la pile que quand les
+    // couches du dessous ont vraiment quelque chose de nouveau à montrer.
+    if (feedReplay(replay, recElapsed())) redraw();
+    recFrame = requestAnimationFrame(recTick);
+  }
+
+  /* ------------------------------------------------- Gestes et historique */
+
+  /* Deux gestes sont annulables, et deux seulement : poser une trace, et
+   * effacer la toile pendant le REC. La profondeur, c'est la couche —
+   * « Annuler » remonte jusqu'à la première trace de la couche active et
+   * s'arrête là. Pas de limite en nombre : une trace ne pèse que ses points,
+   * garder mille gestes coûte moins qu'une seule image de canevas. */
+
+  function recordStroke(layer, item) {
+    if (!layer) return;
+    layer.strokes.push(item);
+    layer.acts.push('s');
+    // Un nouveau geste referme l'avenir qu'on venait d'annuler.
+    layer.undone = [];
+    syncLayerPanel();
+    syncHistoryButtons();
+  }
+
+  /** Effacement daté, appliqué à une couche : elle repart à zéro à cet
+   *  instant, les autres continuent. */
+  function applyClear(layer, at) {
+    if (!layer) return;
+    layer.clears.push(at);
+    layer.acts.push('c');
+    layer.undone = [];
+    layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+    scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
+    syncLayerPanel();
+    syncHistoryButtons();
+    requestRedraw();
+  }
+
+  function undo(quiet) {
+    var layer = activeLayer();
+    if (!layer || !layer.acts.length) return false;
+    var kind = layer.acts.pop();
+    layer.undone.push(kind === 's'
+      ? { k: 's', v: layer.strokes.pop() }
+      : { k: 'c', v: layer.clears.pop() });
+    afterHistory(layer);
+    if (!quiet) {
+      emit({ t: 'undo' });
+      status(kind === 's'
+        ? 'Trace annulée — ' + layer.acts.length + ' geste(s) annulable(s).'
+        : 'Effacement annulé — ' + layer.acts.length + ' geste(s) annulable(s).');
+    }
+    return true;
+  }
+
+  function redo(quiet) {
+    var layer = activeLayer();
+    if (!layer || !layer.undone.length) return false;
+    var step = layer.undone.pop();
+    if (step.k === 's') layer.strokes.push(step.v); else layer.clears.push(step.v);
+    layer.acts.push(step.k);
+    afterHistory(layer);
+    if (!quiet) {
+      emit({ t: 'redo' });
+      status('Geste rétabli — ' + layer.undone.length + ' à rétablir.');
+    }
+    return true;
+  }
+
+  /* Le canevas de la couche se reconstruit : une trace retirée ne laisse
+   * aucune trace, et un effacement annulé fait réapparaître ce qu'il avait
+   * masqué. Reconstruire ne coûte que le redessin des traces de cette
+   * couche-là — jamais celles des autres, qui n'ont pas bougé. */
+  function afterHistory(layer) {
+    rebuildLayer(layer);
+    syncLayerPanel();
+    syncHistoryButtons();
+    requestRedraw();
+    updateExportState();
+  }
+
+  function syncHistoryButtons() {
+    var layer = activeLayer();
+    var busy = previewing || viewing;
+    $('btn-undo').disabled = busy || !layer || !layer.acts.length;
+    $('btn-redo').disabled = busy || !layer || !layer.undone.length;
+  }
+
+  /* ------------------------------------------------- Lecture d'un projet */
+
+  var PROJECT_VERSION = 2;
+
+  /** Les couches d'un fichier projet, ou null s'il n'en décrit aucune.
+   *  Un projet v1 est une seule couche : c'est exactement ce qu'il était. */
+  function projectLayers(data) {
+    if (Array.isArray(data.layers)) {
+      var ok = data.layers.every(function (raw) {
+        return raw && Array.isArray(raw.strokes) && Array.isArray(raw.clears);
+      });
+      return ok ? data.layers : null;
+    }
+    if (Array.isArray(data.strokes) && Array.isArray(data.clears)) {
+      return [{ name: 'Couche 1', visible: true, strokes: data.strokes,
+        clears: data.clears, durationMs: Number(data.durationMs) || 0 }];
+    }
+    return null;
+  }
+
+  /** Remplace les couches courantes par celles d'un projet. Les canevas sont
+   *  vides en sortie : c'est au chargeur de les reconstruire. */
+  function adoptLayers(raw, wantedActive) {
+    layerSeq = 0;
+    layers = raw.map(function (item) {
+      var layer = makeLayer(item.name);
+      layer.visible = item.visible !== false;
+      layer.strokes = item.strokes;
+      layer.clears = item.clears;
+      layer.durationMs = Number(item.durationMs) || 0;
+      // L'historique ne traverse pas un enregistrement : on ne rejoue pas
+      // l'histoire d'une session précédente.
+      layer.acts = [];
+      layer.undone = [];
+      layer.sourceId = item.id;
+      return layer;
+    });
+    if (!layers.length) layers = [makeLayer()];
+    var wanted = layers.filter(function (layer) { return layer.sourceId === wantedActive; })[0];
+    activeId = (wanted || layers[layers.length - 1]).id;
+    bindActiveLayer();
+    syncLayerPanel();
+  }
+
+  /** L'état des couches tel qu'il voyage vers l'autre écran. */
+  function layerState() {
+    return layers.map(function (layer) {
+      return { id: layer.id, name: layer.name, visible: layer.visible };
+    });
+  }
+
+  /* ------------------------------------------------------------ Couches */
+
+  /* Une couche est exactement ce que le projet contenait déjà — des traces et
+   * des effacements — mis dans une boîte nommée, plus le canevas où elle
+   * s'accumule. Aucun champ nouveau sur une trace : le moteur de pinceaux
+   * n'est pas touché, ni ici ni côté Python.
+   *
+   * `acts` est le journal d'insertion des gestes, dans l'ordre : il dit lequel
+   * d'un tracé ou d'un effacement est arrivé en dernier, ce que la seule
+   * lecture des deux tableaux ne permet pas de retrouver. C'est lui que
+   * remonte « Annuler ». */
+
+  function makeLayer(name) {
+    var node = document.createElement('canvas');
+    node.width = config.width;
+    node.height = config.height;
+    layerSeq += 1;
+    return {
+      id: layerSeq,
+      name: name || ('Couche ' + layerSeq),
+      visible: true,
+      strokes: [],
+      clears: [],
+      durationMs: 0,
+      acts: [],
+      undone: [],
+      canvas: node,
+      ctx: node.getContext('2d')
+    };
+  }
+
+  function layerById(id) {
+    for (var i = 0; i < layers.length; i++) {
+      if (layers[i].id === id) return layers[i];
+    }
+    return null;
+  }
+
+  function activeLayer() {
+    return layerById(activeId) || layers[layers.length - 1] || null;
+  }
+
+  /** Nombre total de traces, toutes couches confondues. */
+  function strokeCount() {
+    return layers.reduce(function (n, layer) { return n + layer.strokes.length; }, 0);
+  }
+
+  /** Traces qui partiront réellement à l'export : une couche masquée n'y est
+   *  pas, et c'est la même notion qu'à l'écran — pas deux réglages. */
+  function visibleStrokeCount() {
+    return layers.reduce(function (n, layer) {
+      return n + (layer.visible ? layer.strokes.length : 0);
+    }, 0);
+  }
+
+  /** Pointe `baseCanvas` / `baseCtx` sur la couche active : tout ce qui
+   *  dessine en direct continue d'écrire là, sans savoir qu'il y a des
+   *  couches. */
+  function bindActiveLayer() {
+    var layer = activeLayer();
+    if (!layer) return;
+    baseCanvas = layer.canvas;
+    baseCtx = layer.ctx;
+  }
+
+  function setActiveLayer(id, quiet) {
+    var layer = layerById(id);
+    if (!layer || id === activeId) return;
+    activeId = id;
+    // On ne dessine pas à l'aveugle : rendre une couche active la montre.
+    layer.visible = true;
+    bindActiveLayer();
+    syncLayerPanel();
+    requestRedraw();
+    updateExportState();
+    if (!quiet) {
+      emit({ t: 'layers', list: layerState(), activeId: activeId });
+      status('Couche active : ' + activeLayer().name + '.');
+    }
+  }
+
+  /** Repart d'une seule couche vide. Le format de travail a changé, ou un
+   *  projet se charge : les traces déjà posées n'ont plus de référentiel. */
+  function resetLayers() {
+    layerSeq = 0;
+    layers = [makeLayer()];
+    activeId = layers[0].id;
+    bindActiveLayer();
+    syncLayerPanel();
+  }
+
+  function resizeLayers() {
+    layers.forEach(function (layer) {
+      layer.canvas.width = config.width;
+      layer.canvas.height = config.height;
+    });
+  }
+
+  /** Vide la couche active — ses traces, ses effacements, son historique.
+   *  Les couches verrouillées ne bougent pas : c'est tout l'intérêt. */
+  function clearActiveLayer() {
+    var layer = activeLayer();
+    if (!layer) return;
+    layer.strokes = [];
+    layer.clears = [];
+    layer.acts = [];
+    layer.undone = [];
+    layer.durationMs = 0;
+    layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+    scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
+    t0 = null;
+    lastElapsed = 0;
+    syncLayerPanel();
+    requestRedraw();
+    updateExportState();
+  }
+
+  /** Reconstruit le canevas d'une couche à partir de ses métadonnées. */
+  function rebuildLayer(layer) {
+    layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+    // Un effacement remet la couche à zéro : seul ce qui suit le dernier compte.
+    var lastClear = layer.clears.length ? Math.max.apply(null, layer.clears) : -Infinity;
+    layer.strokes.forEach(function (item) {
+      var points = item.points.filter(function (point) { return point.t >= lastClear; });
+      if (!points.length) return;
+      var trace = makeTrace({ brush: item.brush, seed: item.seed, points: points });
+      feedTrace(trace, Infinity);
+      commitTrace(trace, layer.ctx);
+    });
+  }
+
+  /* -------------------------------------------------------------- Rejeu */
+
+  /* Un rejeu rejoue des couches dans leur propre canevas en avançant dans le
+   * temps. La prévisualisation le fait sur toutes ; le REC sur toutes sauf
+   * l'active — c'est ce qui fait apparaître la couche 1, animée et calée sur
+   * le média, sous le stylet qui dessine la couche 2. Sans ça, impossible de
+   * poser un trait au bon moment sur une prise déjà faite. */
+
+  function makeReplay(list) {
+    return list.map(function (layer) {
+      return {
+        layer: layer,
+        queue: layer.strokes.slice().sort(function (a, b) {
+          return a.points[0].t - b.points[0].t;
+        }),
+        clears: layer.clears.slice().sort(function (a, b) { return a - b; }),
+        active: []
+      };
+    });
+  }
+
+  /** Avance un rejeu. Retourne true si quelque chose a bougé — une trace
+   *  posée, un effacement, une trace terminée. Le reste du temps il n'y a rien
+   *  à recomposer : pendant le REC, la plupart des images ne voient rien
+   *  arriver dans les couches du dessous, et recomposer la pile a chacune
+   *  coûterait du temps au stylet qui, lui, dessine. */
+  function feedReplay(list, elapsedMs) {
+    var moved = false;
+    list.forEach(function (track) {
+      // Un effacement ne remet à zéro que SA couche ; les autres continuent.
+      while (track.clears.length && track.clears[0] <= elapsedMs) {
+        track.clears.shift();
+        track.layer.ctx.clearRect(0, 0, track.layer.canvas.width, track.layer.canvas.height);
+        track.active.forEach(function (trace) {
+          trace.ctx.clearRect(0, 0, trace.canvas.width, trace.canvas.height);
+        });
+        moved = true;
+      }
+      while (track.queue.length && track.queue[0].points[0].t <= elapsedMs) {
+        track.active.push(makeTrace(track.queue.shift()));
+        moved = true;
+      }
+      for (var i = track.active.length - 1; i >= 0; i--) {
+        var before = track.active[i].cursor;
+        var done = feedTrace(track.active[i], elapsedMs);
+        if (track.active[i].cursor !== before) moved = true;
+        if (done) {
+          commitTrace(track.active[i], track.layer.ctx);
+          track.active.splice(i, 1);
+          moved = true;
+        }
+      }
+    });
+    return moved;
+  }
+
+  function replayFinished(list) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].queue.length || list[i].active.length) return false;
+    }
+    return true;
+  }
+
+  var NO_TRACE = [];
+
+  /** Les traces d'une couche encore en cours d'écriture dans le rejeu. */
+  function replayPending(layer) {
+    if (!replay) return NO_TRACE;
+    for (var i = 0; i < replay.length; i++) {
+      if (replay[i].layer === layer) return replay[i].active;
+    }
+    return NO_TRACE;
+  }
+
   function requestRedraw() {
     if (redrawPending) return;
     redrawPending = true;
@@ -1177,23 +1754,32 @@
     target.restore();
   }
 
+  /* L'empilement à l'écran est celui des couches, et ce qui n'est pas encore
+   * fusionné se compose juste au-dessus de SA couche, jamais au-dessus de la
+   * pile : une trace de la couche 1 reste sous la couche 2, y compris pendant
+   * qu'elle s'écrit. C'est la seule chose qui distingue de vraies couches d'un
+   * empilement décoratif — et `renderer.py` fait exactement la même. */
   function redraw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(baseCanvas, 0, 0);
-    if (previewing) {
-      previewActive.forEach(function (layer) { composite(ctx, layer.canvas, layer.brush); });
-    } else if (stroke) {
-      composite(ctx, scratchCanvas, stroke.brush);
-    }
-    // Traces en cours d'arrivee de la tablette. Comme le trace local, chacun
-    // vit dans son propre calque jusqu'a sa fin : c'est ce qui rend son
-    // opacite globale et sa gomme corrects, au lieu de cumuler empreinte par
-    // empreinte.
-    for (var id in incoming) {
-      if (Object.prototype.hasOwnProperty.call(incoming, id)) {
-        composite(ctx, incoming[id].canvas, incoming[id].brush);
+    var current = activeLayer();
+    layers.forEach(function (layer) {
+      if (!layer.visible) return;
+      ctx.drawImage(layer.canvas, 0, 0);
+      replayPending(layer).forEach(function (trace) {
+        composite(ctx, trace.canvas, trace.brush);
+      });
+      if (layer !== current) return;
+      if (stroke) composite(ctx, scratchCanvas, stroke.brush);
+      // Traces en cours d'arrivee de la tablette. Comme le trace local, chacun
+      // vit dans son propre calque jusqu'a sa fin : c'est ce qui rend son
+      // opacite globale et sa gomme corrects, au lieu de cumuler empreinte par
+      // empreinte.
+      for (var id in incoming) {
+        if (Object.prototype.hasOwnProperty.call(incoming, id)) {
+          composite(ctx, incoming[id].canvas, incoming[id].brush);
+        }
       }
-    }
+    });
   }
 
   function addPoint(event, isFirst) {
@@ -1209,6 +1795,8 @@
     // ne doit plus rien poser, sinon deux traces se melangeraient dans le
     // meme enregistrement sans qu'aucun des deux ecrans ne le montre.
     if (!ready || viewing || drawing || previewing) return;
+    // Un pincement est en cours : le second doigt navigue, il ne pose rien.
+    if (pinch) return;
 
     if (desktopShortcutsEnabled()) {
       if (shortcutState.space && event.button === 0) { startSpacePan(event); return; }
@@ -1288,7 +1876,7 @@
     try { canvas.releasePointerCapture(event.pointerId); } catch (e) { /* déjà relâché */ }
 
     if (stroke.points.length) {
-      strokes.push(stroke);
+      recordStroke(activeLayer(), stroke);
       baseCtx.save();
       baseCtx.globalAlpha = stroke.brush.opacity;
       if (stroke.brush.eraser) baseCtx.globalCompositeOperation = 'destination-out';
@@ -1579,6 +2167,95 @@
     applyView();
   }, { passive: false });
 
+  /* ------------------------------------------------- Pincement tactile */
+
+  /* Sur un poste, le pincement du pavé tactile arrive déjà cuit : le
+   * navigateur le présente comme une molette avec `ctrlKey`. Sur une tablette,
+   * un pincement est ce qu'il est — deux doigts —, et rien ne l'annonce : il
+   * faut le suivre doigt par doigt. C'est là qu'il manquait, et c'est là qu'il
+   * sert le plus : la tablette n'a ni molette, ni clavier pour `Ctrl + +`.
+   *
+   * Deux doigts veulent naviguer, pas dessiner : le trait que le premier avait
+   * commencé est abandonné — jamais enregistré, jamais exporté. Le stylet,
+   * lui, n'est pas interrompu : une paume posée à côté ne doit pas lui couper
+   * son geste. */
+
+  var touching = {};   /* pointerId tactile -> dernière position connue */
+  var pinch = null;    /* écart et milieu des deux doigts, à la dernière image */
+
+  function touchCount() {
+    return Object.keys(touching).length;
+  }
+
+  function pinchGeometry() {
+    var ids = Object.keys(touching);
+    var a = touching[ids[0]];
+    var b = touching[ids[1]];
+    var dx = b.x - a.x;
+    var dy = b.y - a.y;
+    return {
+      // Jamais zéro : deux doigts parfaitement superposés diviseraient par lui.
+      spread: Math.max(1, Math.sqrt(dx * dx + dy * dy)),
+      x: (a.x + b.x) / 2,
+      y: (a.y + b.y) / 2
+    };
+  }
+
+  /** Abandonne le trait en cours sans l'enregistrer. */
+  function abortStroke() {
+    if (!drawing) return;
+    drawing = false;
+    setTabletDrawingState(false);
+    stroke = null;
+    stamper = null;
+    scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
+    if (streaming() && sendingStroke) {
+      // L'autre écran a vu le trait naître : il doit le voir disparaître,
+      // sinon son calque resterait à l'écran sans jamais être fusionné.
+      REMOTE.send({ t: 'stroke.abort', id: sendingStroke });
+      sendingStroke = null;
+    }
+    requestRedraw();
+  }
+
+  $('workspace').addEventListener('pointerdown', function (event) {
+    if (event.pointerType !== 'touch') return;
+    touching[event.pointerId] = { x: event.clientX, y: event.clientY };
+    if (touchCount() !== 2) return;
+    // En phase de capture : le garde de `onPointerDown` lit `pinch` juste
+    // après, et le second doigt ne commence donc aucun trait.
+    abortStroke();
+    stopPanning();
+    pinch = pinchGeometry();
+  }, true);
+
+  window.addEventListener('pointermove', function (event) {
+    if (event.pointerType !== 'touch' || !touching[event.pointerId]) return;
+    touching[event.pointerId].x = event.clientX;
+    touching[event.pointerId].y = event.clientY;
+    if (!pinch || touchCount() !== 2) return;
+    event.preventDefault();
+
+    var now = pinchGeometry();
+    zoomAt(now.x, now.y, view.zoom * (now.spread / pinch.spread));
+    // Les deux doigts déplacent aussi : un pincement qui ne ferait que zoomer
+    // laisserait le détail visé hors du cadre une fois sur deux.
+    view.panX += now.x - pinch.x;
+    view.panY += now.y - pinch.y;
+    applyView();
+    pinch = now;
+  }, { passive: false });
+
+  ['pointerup', 'pointercancel'].forEach(function (type) {
+    window.addEventListener(type, function (event) {
+      if (event.pointerType !== 'touch') return;
+      delete touching[event.pointerId];
+      // Un doigt levé sur trois laisse un pincement valable : on repart du
+      // nouvel écart plutôt que de faire sauter l'image.
+      pinch = touchCount() === 2 ? pinchGeometry() : null;
+    });
+  });
+
   /* Clic molette : déplacement de la vue, sans jamais dessiner. */
   $('workspace').addEventListener('pointerdown', function (event) {
     if (event.button !== 1) return;
@@ -1653,6 +2330,16 @@
       return;
     }
 
+    // Annuler / rétablir. Disponible aussi sur la tablette : c'est elle qui
+    // dessine, c'est elle qui doit pouvoir revenir en arrière.
+    if ((event.ctrlKey || event.metaKey) && (event.code === 'KeyZ' || event.code === 'KeyY')) {
+      event.preventDefault();
+      if (previewing) return;
+      if (viewing) { status(handOverNotice('annuler')); return; }
+      if (event.code === 'KeyY' || event.shiftKey) redo(); else undo();
+      return;
+    }
+
     if (event.ctrlKey || event.metaKey) {
       if (event.key === '+' || event.key === '=') { event.preventDefault(); zoomByStep(1.25); }
       else if (event.key === '-') { event.preventDefault(); zoomByStep(1 / 1.25); }
@@ -1697,36 +2384,40 @@
     stopPanning();
   });
 
-  function clearAll() {
-    strokes = [];
-    clears = [];
-    t0 = null;
-    lastElapsed = 0;
-    recordedDuration = 0;
-    baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
-    scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
-    requestRedraw();
-    updateExportState();
-  }
-
   function updateExportState() {
     // Tant que la tablette a la main, l'export attend : c'est elle qui décide
     // quand le tracé est terminé, et le poste ne reprend qu'ensuite.
-    var usable = strokes.length > 0 && !recording && !previewing && !viewing;
+    var usable = visibleStrokeCount() > 0 && !recording && !previewing && !viewing;
     $('btn-export').disabled = !usable;
     $('btn-preview').disabled = !usable;
-    if (strokes.length && !previewing) {
-      status(strokes.length + ' tracé(s) — ' + (duration() / 1000).toFixed(1) + ' s.');
+    syncHistoryButtons();
+    if (strokeCount() && !previewing) status(drawingSummary());
+  }
+
+  /** Ce que la ligne d'état dit du dessin. Une couche masquée y est nommée :
+   *  elle ne s'exporte pas, et le découvrir au fichier livré serait tard. */
+  function drawingSummary() {
+    var current = activeLayer();
+    var hidden = layers.filter(function (layer) { return !layer.visible; }).length;
+    var text = (current ? current.name + ' — ' + current.strokes.length + ' tracé(s). ' : '');
+    if (layers.length > 1) {
+      text += layers.length + ' couches, ' + strokeCount() + ' tracés au total — ';
     }
+    text += (duration() / 1000).toFixed(1) + ' s.';
+    if (hidden) text += ' ' + hidden + ' couche(s) masquée(s), exclue(s) de l’export.';
+    return text;
   }
 
   function duration() {
-    var last = 0;
-    strokes.forEach(function (item) {
-      var points = item.points;
-      if (points.length) last = Math.max(last, points[points.length - 1].t);
+    var last = recordedDuration;
+    layers.forEach(function (layer) {
+      last = Math.max(last, layer.durationMs || 0);
+      layer.strokes.forEach(function (item) {
+        var points = item.points;
+        if (points.length) last = Math.max(last, points[points.length - 1].t);
+      });
     });
-    return Math.max(recordedDuration, last);
+    return last;
   }
 
   /* ------------------------------------------------------------ Setup */
@@ -1751,10 +2442,14 @@
     config.fps = next.fps;
     config.alpha = !!next.alpha;
 
-    [canvas, overlay, baseCanvas, scratchCanvas].forEach(function (node) {
+    [canvas, overlay, scratchCanvas].forEach(function (node) {
       node.width = config.width;
       node.height = config.height;
     });
+    // Redimensionner un canevas le vide : c'est voulu, les traces qui s'y
+    // trouvaient étaient exprimées dans l'ancien référentiel. Celui qui charge
+    // un projet reconstruit derrière (`rebuildFinalCanvasAsync`).
+    if (!layers.length) resetLayers(); else { resizeLayers(); bindActiveLayer(); }
 
     /* Le damier n'est plus une conséquence de l'export alpha mais un choix de
      * fond à part entière. On ne le retient d'office que pour un premier
@@ -2646,7 +3341,8 @@
     // l'instant du départ que le temps de la présenter.
     seekToInPoint();
     countdown(function () {
-      clearAll();
+      clearActiveLayer();
+      startUnderlay();
       recording = true;
       // `t0` reste ouvert : c'est la première image du rush qui le posera.
       // Un point tracé avant elle le poserait lui-même (voir `elapsed`), ce
@@ -2674,6 +3370,7 @@
         if (t0 === null) t0 = performance.now() - lag;
         recordStart = t0;
       });
+      if (replay) recFrame = requestAnimationFrame(recTick);
     });
   });
 
@@ -2778,6 +3475,10 @@
     // celle du décodeur — assez pour une image de trop en bout de couche.
     var span = mediaSpanElapsed();
     recordedDuration = span === null ? performance.now() - recordStart : span;
+    // Chaque couche garde la durée de SA prise : la durée du rendu est le
+    // maximum, une prise courte par-dessus une longue ne raccourcit rien.
+    if (activeLayer()) activeLayer().durationMs = recordedDuration;
+    stopUnderlay();
     emit({ t: 'rec.stop', duration: recordedDuration });
 
     if (MediaTransport.isTimed()) {
@@ -2796,19 +3497,17 @@
     if (recording) {
       // Pendant le REC on repart d'une toile vierge sans perdre l'enregistrement :
       // l'effacement devient un évènement de la timeline, rejoué à l'export.
-      var at = elapsed();
-      clears.push(at);
-      baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
-      scratchCtx.clearRect(0, 0, scratchCanvas.width, scratchCanvas.height);
-      requestRedraw();
-      emit({ t: 'clear', at: at });
-      status('Toile effacée — le tracé déjà enregistré est conservé.');
+      applyClear(activeLayer(), elapsed());
+      emit({ t: 'clear', at: activeLayer().clears[activeLayer().clears.length - 1] });
+      status('Couche effacée — le tracé déjà enregistré est conservé.');
       return;
     }
     stopPreview();
-    clearAll();
+    clearActiveLayer();
     emit({ t: 'reset' });
-    status('Zone de dessin effacée.');
+    status(layers.length > 1
+      ? activeLayer().name + ' effacée — les couches verrouillées sont intactes.'
+      : 'Zone de dessin effacée.');
   });
 
   /* --------------------------------------------------- Prévisualisation */
@@ -2817,16 +3516,25 @@
    * est celle du renderer Python : chaque trace est rasterisée dans son propre
    * calque, puis fusionnée dans le canvas une fois terminée. */
 
-  function makeLayer(item) {
-    var layerCanvas = document.createElement('canvas');
-    layerCanvas.width = canvas.width;
-    layerCanvas.height = canvas.height;
-    var layerCtx = layerCanvas.getContext('2d');
+  /** Rasterisation d'UN tracé dans son propre tampon — du posé du stylet au
+   *  lâché. À ne pas confondre avec une couche, qui en contient plusieurs.
+   *
+   *  `seed` est recopiée : le tampon sert aussi de mémoire au tracé le temps
+   *  qu'il s'écrive, et c'est à partir de lui que le poste reconstitue ce que
+   *  la tablette a dessiné (voir `remoteStrokeEnd`). Sans elle, ce tracé-là
+   *  repartait à l'export sur une autre graine que celle affichée sous le
+   *  stylet — donc une autre dispersion et d'autres taches. */
+  function makeTrace(item) {
+    var traceCanvas = document.createElement('canvas');
+    traceCanvas.width = canvas.width;
+    traceCanvas.height = canvas.height;
+    var traceCtx = traceCanvas.getContext('2d');
     return {
-      canvas: layerCanvas,
-      ctx: layerCtx,
+      canvas: traceCanvas,
+      ctx: traceCtx,
       brush: item.brush,
-      stamper: new BE.StrokeStamper(item.brush, item.seed, layerCtx),
+      seed: item.seed,
+      stamper: new BE.StrokeStamper(item.brush, item.seed, traceCtx),
       points: item.points,
       cursor: 0
     };
@@ -2834,39 +3542,39 @@
 
   /** Reconstruit l'état final du dessin (traces + effacements) sans animation. */
   function rebuildFinalCanvas() {
-    baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
-    // Un effacement remet la toile à zéro : seul ce qui suit le dernier compte.
-    var lastClear = clears.length ? Math.max.apply(null, clears) : -Infinity;
-    strokes.forEach(function (item) {
-      var points = item.points.filter(function (point) { return point.t >= lastClear; });
-      if (!points.length) return;
-      var layer = makeLayer({ brush: item.brush, seed: item.seed, points: points });
-      feedLayer(layer, Infinity);
-      commitLayer(layer);
-    });
+    layers.forEach(rebuildLayer);
   }
 
   /** Variante asynchrone : reconstruction par tranches pour rester réactif.
    *  `onProgress(ratio)` est appelé après chaque tranche (0..1) ; une valeur
    *  égale à 1 signale la fin. */
   function rebuildFinalCanvasAsync(onProgress) {
-    baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
-    var lastClear = clears.length ? Math.max.apply(null, clears) : -Infinity;
-    var i = 0;
-    var total = strokes.length;
+    // Le travail est aplati couche par couche : la barre de progression compte
+    // des traces, pas des couches — trois couches très inégales feraient
+    // sinon une barre qui saute.
+    var work = [];
+    layers.forEach(function (layer) {
+      layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+      var lastClear = layer.clears.length ? Math.max.apply(null, layer.clears) : -Infinity;
+      layer.strokes.forEach(function (item) {
+        work.push({ layer: layer, item: item, from: lastClear });
+      });
+    });
 
+    var i = 0;
+    var total = work.length;
     if (total === 0) { onProgress(1); return; }
 
     function chunk() {
       // Budjet de 50 ms par tranche : l'interface reste responsive sans être trop lente.
       var deadline = performance.now() + 50;
       while (i < total && performance.now() < deadline) {
-        var item = strokes[i++];
-        var points = item.points.filter(function (p) { return p.t >= lastClear; });
+        var job = work[i++];
+        var points = job.item.points.filter(function (p) { return p.t >= job.from; });
         if (points.length) {
-          var layer = makeLayer({ brush: item.brush, seed: item.seed, points: points });
-          feedLayer(layer, Infinity);
-          commitLayer(layer);
+          var trace = makeTrace({ brush: job.item.brush, seed: job.item.seed, points: points });
+          feedTrace(trace, Infinity);
+          commitTrace(trace, job.layer.ctx);
         }
       }
       onProgress(i / total);
@@ -2875,31 +3583,32 @@
     requestAnimationFrame(chunk);
   }
 
-  /** Alimente un calque jusqu'à l'instant donné. Retourne true si le trace est fini. */
-  function feedLayer(layer, until) {
-    while (layer.cursor < layer.points.length && layer.points[layer.cursor].t <= until) {
-      var point = layer.points[layer.cursor];
-      if (layer.cursor === 0) layer.stamper.begin(point); else layer.stamper.extend(point);
-      layer.cursor += 1;
+  /** Alimente un tracé jusqu'à l'instant donné. Retourne true s'il est fini. */
+  function feedTrace(trace, until) {
+    while (trace.cursor < trace.points.length && trace.points[trace.cursor].t <= until) {
+      var point = trace.points[trace.cursor];
+      if (trace.cursor === 0) trace.stamper.begin(point); else trace.stamper.extend(point);
+      trace.cursor += 1;
     }
-    return layer.cursor >= layer.points.length;
+    return trace.cursor >= trace.points.length;
   }
 
-  function commitLayer(layer) {
-    composite(baseCtx, layer.canvas, layer.brush);
+  /** Fusionne un tracé terminé dans le canevas d'une couche. */
+  function commitTrace(trace, target) {
+    composite(target, trace.canvas, trace.brush);
   }
 
   function startPreview() {
-    if (previewing || drawing || recording || !strokes.length) return;
+    if (previewing || drawing || recording || !visibleStrokeCount()) return;
 
     previewing = true;
     previewDuration = duration() + 400;
-    previewQueue = strokes.slice().sort(function (a, b) {
-      return a.points[0].t - b.points[0].t;
+    // Toutes les couches se rejouent, chacune dans son canevas : l'ordre
+    // d'empilement tient tout seul au moment de composer (voir `redraw`).
+    replay = makeReplay(layers);
+    layers.forEach(function (layer) {
+      layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
     });
-    previewActive = [];
-    previewClears = clears.slice().sort(function (a, b) { return a - b; });
-    baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
     redraw();
 
     setToolLabel('btn-preview', 'Arrêter');
@@ -2920,30 +3629,12 @@
   function previewTick() {
     var elapsedMs = performance.now() - previewStart;
 
-    while (previewClears.length && previewClears[0] <= elapsedMs) {
-      previewClears.shift();
-      baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
-      previewActive.forEach(function (layer) {
-        layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
-      });
-    }
-
-    while (previewQueue.length && previewQueue[0].points[0].t <= elapsedMs) {
-      previewActive.push(makeLayer(previewQueue.shift()));
-    }
-
-    for (var i = previewActive.length - 1; i >= 0; i--) {
-      if (feedLayer(previewActive[i], elapsedMs)) {
-        commitLayer(previewActive[i]);
-        previewActive.splice(i, 1);
-      }
-    }
-
+    feedReplay(replay, elapsedMs);
     redraw();
     status('Prévisualisation — ' + (elapsedMs / 1000).toFixed(1)
       + ' s / ' + (previewDuration / 1000).toFixed(1) + ' s');
 
-    if (elapsedMs >= previewDuration && !previewQueue.length && !previewActive.length) {
+    if (elapsedMs >= previewDuration && replayFinished(replay)) {
       stopPreview();
       return;
     }
@@ -2957,9 +3648,7 @@
     previewFrame = null;
 
     // Termine instantanément le rejeu pour retrouver l'état final du dessin.
-    previewActive = [];
-    previewQueue = [];
-    previewClears = [];
+    replay = null;
     rebuildFinalCanvas();
 
     if (mediaNode && mediaType !== 'image') mediaNode.pause();
@@ -3044,6 +3733,14 @@
   };
 
   function syncExportDialog() {
+    var hidden = layers.filter(function (layer) { return !layer.visible; }).length;
+    var note = $('export-layers-note');
+    note.style.display = hidden ? '' : 'none';
+    note.textContent = hidden
+      ? (layers.length - hidden) + ' couche(s) sur ' + layers.length + ' seront exportées — '
+        + hidden + ' masquée(s).'
+      : '';
+
     var mode = $('export-mode').value;
     var pro = mode === 'pro';
     var h264 = mode === 'preview';
@@ -3086,7 +3783,7 @@
   }
 
   function openExportDialog() {
-    if (isTablet || !ready || !strokes.length || recording || previewing || viewing) return;
+    if (isTablet || !ready || !visibleStrokeCount() || recording || previewing || viewing) return;
     var media = exportableMedia();
     // L'export pro est fait de trois couches dont l'une est le média : sans
     // média — pas même un son — il n'y a rien à décomposer.
@@ -3110,15 +3807,24 @@
   function projectData() {
     return {
       format: 'live_notes',
-      version: 1,
+      version: PROJECT_VERSION,
       savedAt: new Date().toISOString(),
       config: {
         width: config.width, height: config.height, fps: config.fps,
         alpha: config.alpha, background: config.background
       },
-      strokes: strokes,
-      clears: clears,
-      durationMs: recordedDuration,
+      layers: layers.map(function (layer) {
+        return {
+          id: layer.id,
+          name: layer.name,
+          visible: layer.visible,
+          strokes: layer.strokes,
+          clears: layer.clears,
+          durationMs: layer.durationMs || 0
+        };
+      }),
+      activeLayer: activeId,
+      durationMs: duration(),
       // Points IN/OUT du transport, conservés pour restauration au rechargement.
       inPoint:  MediaTransport.isTimed() ? MediaTransport.inPoint()  : null,
       outPoint: MediaTransport.isTimed() ? MediaTransport.outPoint() : null,
@@ -3166,10 +3872,10 @@
     reader.onload = function () {
       try {
         var data = JSON.parse(reader.result);
-        if (!data || data.format !== 'live_notes' || data.version !== 1
-          || !Array.isArray(data.strokes) || !Array.isArray(data.clears)) {
-          throw new Error('format');
-        }
+        if (!data || data.format !== 'live_notes') throw new Error('format');
+        if (data.version > PROJECT_VERSION) throw new Error('version');
+        var loaded = projectLayers(data);
+        if (!loaded) throw new Error('format');
         if (recording) stopRecording();
         if (previewing) stopPreview();
 
@@ -3187,8 +3893,7 @@
           alpha: !!next.alpha,
           background: next.background || '#ffffff'
         });
-        strokes = data.strokes;
-        clears = data.clears;
+        adoptLayers(loaded, data.activeLayer);
         recordedDuration = Number(data.durationMs) || 0;
 
         // Afficher la barre de progression pendant la reconstruction des tracés.
@@ -3208,7 +3913,11 @@
         });
       } catch (e) {
         pendingProject = null;
-        status('Projet .lvn invalide.');
+        // « Trop récent » et « pas un projet » ne se rattrapent pas de la même
+        // façon : l'un demande une mise à jour, l'autre un autre fichier.
+        status(e && e.message === 'version'
+          ? 'Projet enregistré par une version plus récente de live_notes.'
+          : 'Projet .lvn invalide.');
       }
     };
     reader.onerror = function () { status('Impossible de lire le projet.'); };
@@ -3373,8 +4082,12 @@
       folder: $('export-name').value,
       directory: $('export-dir').value,
       durationMs: duration(),
-      strokes: strokes,
-      clears: clears,
+      // Une couche masquée n'est pas envoyée : masquer et exclure de l'export
+      // sont la même notion, pas deux réglages qui pourraient se contredire.
+      layers: layers.filter(function (layer) { return layer.visible; })
+        .map(function (layer) {
+          return { strokes: layer.strokes, clears: layer.clears };
+        }),
       // Ce que le canevas montrait sous le tracé : le cadrage du média, et la
       // portion qui a été jouée. Le point IN est l'origine des temps du tracé,
       // donc celle de toutes les couches.
@@ -3872,7 +4585,7 @@
     if (!tabletReady || changed) {
       // Changer de format en cours de dessin invaliderait les tracés déjà
       // posés : ils sont exprimés dans l'ancien référentiel.
-      if (tabletReady && changed && strokes.length) clearAll();
+      if (tabletReady && changed && strokeCount()) resetLayers();
       createWorkspace(next);
       tabletReady = true;
     }
@@ -3957,15 +4670,25 @@
       case 'stroke.begin': return remoteStrokeBegin(message);
       case 'stroke.points': return remoteStrokePoints(message);
       case 'stroke.end': return remoteStrokeEnd(message);
+      case 'stroke.abort': return remoteStrokeAbort(message);
       case 'transport': return remoteTransport(message);
       case 'rec.start': return remoteRecStart();
       case 'rec.stop': return remoteRecStop(message);
       case 'clear': return remoteClear(message);
       case 'reset': return remoteReset();
+      case 'layers': return remoteLayers(message);
+      case 'undo': return undo(true);
+      case 'redo': return redo(true);
       case 'brush': return remoteBrush(message);
       case 'range': return remoteRange(message);
       case 'control': return remoteControl(message);
-      case 'peers': return updateTabletBadge();
+      case 'peers':
+        updateTabletBadge();
+        // Une tablette qui arrive ne connaît pas encore la pile : le poste la
+        // lui dit. Le contenu déjà dessiné, lui, ne se rattrape pas — c'était
+        // déjà le cas des traces avant les couches.
+        if (!isTablet) emit({ t: 'layers', list: layerState(), activeId: activeId });
+        return undefined;
       default: return undefined;
     }
   }
@@ -3974,31 +4697,39 @@
     var brush = BE.normalize(message.brush);
     // Même pinceau, même graine, même moteur : le tracé reconstruit ici est
     // identique au pixel près à celui affiché sous le stylet.
-    var layer = makeLayer({ brush: brush, seed: message.seed, points: [message.point] });
-    incoming[message.id] = layer;
-    feedLayer(layer, Infinity);
+    var trace = makeTrace({ brush: brush, seed: message.seed, points: [message.point] });
+    incoming[message.id] = trace;
+    feedTrace(trace, Infinity);
     requestRedraw();
   }
 
   function remoteStrokePoints(message) {
-    var layer = incoming[message.id];
-    if (!layer) return;
-    for (var i = 0; i < message.points.length; i++) layer.points.push(message.points[i]);
-    feedLayer(layer, Infinity);
+    var trace = incoming[message.id];
+    if (!trace) return;
+    for (var i = 0; i < message.points.length; i++) trace.points.push(message.points[i]);
+    feedTrace(trace, Infinity);
     requestRedraw();
   }
 
   function remoteStrokeEnd(message) {
-    var layer = incoming[message.id];
-    if (!layer) return;
+    var trace = incoming[message.id];
+    if (!trace) return;
     delete incoming[message.id];
-    feedLayer(layer, Infinity);
-    commitLayer(layer);
+    feedTrace(trace, Infinity);
+    commitTrace(trace, baseCtx);
     // Le poste accumule le tracé complet : c'est lui qui exportera, avec
     // exactement la même charge utile qu'en solo.
-    strokes.push({ brush: layer.brush, seed: layer.seed, points: layer.points });
+    recordStroke(activeLayer(), { brush: trace.brush, seed: trace.seed, points: trace.points });
     requestRedraw();
     updateExportState();
+  }
+
+  /** Le trait a été abandonné là-bas (un pincement l'a interrompu) : il n'est
+   *  pas terminé, il n'a jamais existé. */
+  function remoteStrokeAbort(message) {
+    if (!incoming[message.id]) return;
+    delete incoming[message.id];
+    requestRedraw();
   }
 
   /* Une tablette qui se déconnecte au milieu d'un tracé laisserait un calque
@@ -4037,8 +4768,13 @@
   }
 
   function remoteRecStart() {
-    clearAll();
+    // Le REC de l'autre écran ne vide que la couche active, comme ici — les
+    // couches verrouillées se rejouent dessous des deux côtés.
+    clearActiveLayer();
+    startUnderlay();
     recording = true;
+    t0 = performance.now();
+    if (replay) recFrame = requestAnimationFrame(recTick);
     // Le lecteur de cet écran suit celui qui enregistre. Sans le verrou, sa
     // propre borne de sortie l'arrêterait de son côté pendant que l'autre
     // continue : les deux écrans cesseraient de montrer la même image, et le
@@ -4069,18 +4805,21 @@
   function remoteRecStop(message) {
     recording = false;
     recordedDuration = Math.max(recordedDuration, message.duration || 0);
+    if (activeLayer()) {
+      activeLayer().durationMs = Math.max(activeLayer().durationMs || 0, message.duration || 0);
+    }
+    stopUnderlay();
     if (MediaTransport.isTimed()) {
       MediaTransport.setLocked(false);
       MediaTransport.parkAtOut();
     }
     document.body.classList.remove('recording');
     updateExportState();
-    status('Enregistrement terminé sur la tablette — ' + strokes.length + ' tracé(s).');
+    status('Enregistrement terminé sur la tablette — ' + strokeCount() + ' tracé(s).');
   }
 
   function remoteClear(message) {
-    clears.push(message.at);
-    baseCtx.clearRect(0, 0, baseCanvas.width, baseCanvas.height);
+    applyClear(activeLayer(), message.at);
     Object.keys(incoming).forEach(function (id) {
       incoming[id].ctx.clearRect(0, 0, canvas.width, canvas.height);
     });
@@ -4089,7 +4828,37 @@
 
   function remoteReset() {
     incoming = {};
-    clearAll();
+    clearActiveLayer();
+  }
+
+  /** Le poste structure, la tablette suit : la pile de couches voyage en
+   *  entier plutôt qu'en commandes, ce qui interdit aux deux écrans de
+   *  diverger sur une commande perdue. Le contenu ne voyage pas — chaque
+   *  écran a déjà le sien, par les tracés relayés. */
+  function remoteLayers(message) {
+    var list = message.list || [];
+    if (!list.length) return;
+    var known = {};
+    layers.forEach(function (layer) { known[layer.id] = layer; });
+
+    layers = list.map(function (item) {
+      var layer = known[item.id];
+      if (!layer) {
+        layer = makeLayer(item.name);
+        layer.id = item.id;
+      }
+      layerSeq = Math.max(layerSeq, item.id);
+      layer.name = item.name;
+      layer.visible = item.visible !== false;
+      return layer;
+    });
+
+    activeId = layerById(message.activeId) ? message.activeId : layers[layers.length - 1].id;
+    bindActiveLayer();
+    syncLayerPanel();
+    syncHistoryButtons();
+    requestRedraw();
+    updateExportState();
   }
 
   function remoteBrush(message) {

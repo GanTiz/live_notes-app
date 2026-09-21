@@ -405,6 +405,12 @@
             gap: 8px;
             flex-shrink: 0;
         }
+        /* Annuler / rétablir : un couple, donc collés, et sans légende — deux
+         * libellés de plus feraient passer la rangée à la ligne sur les écrans
+         * qui ont le moins de hauteur à perdre (voir .toolbar-group.grow). */
+        .btn-pair { display: flex; gap: 2px; }
+        .btn-pair .btn-tool { min-width: 34px; padding: 6px 7px; }
+        .btn-pair .btn-tool > span { display: none; }
         .field { display: flex; flex-direction: column; gap: 3px; }
         .field > label {
             font-size: 9px;
@@ -577,6 +583,7 @@
         }
         #panel.collapsed .panel-title-block,
         #panel.collapsed #panel-params,
+        #panel.collapsed .panel-pane,
         #panel.collapsed .stack { display: none; }
         #panel.collapsed #panel-tab-label {
             display: block;
@@ -588,6 +595,83 @@
             color: var(--text-faint);
             white-space: nowrap;
         }
+        /* Deux onglets : le pinceau se règle, les couches se rangent. Les
+         * réglages du pinceau sont longs — une liste de couches épinglée
+         * dessous aurait été poussée hors de vue dès trois couches. */
+        #panel-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 8px;
+        }
+        .panel-tab {
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 5px 6px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: .02em;
+            background: var(--surface-2);
+            border-color: var(--border);
+            color: var(--text-dim);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .panel-tab[aria-selected="true"] {
+            background: var(--surface-3);
+            border-color: var(--border-strong);
+            color: var(--text);
+        }
+        .panel-tab .count { font-weight: 400; color: var(--text-faint); }
+        .panel-tab[aria-selected="true"] .count { color: var(--text-dim); }
+        /* Le poste structure, la tablette dessine : pas de gestion des couches
+         * sur la tablette, elle voit seulement se rejouer ce qui est dessous. */
+        body.tablet #panel-tabs { display: none; }
+
+        /* ------------------------------------------------------- Couches */
+        #layer-list { display: flex; flex-direction: column; gap: 3px; padding: 12px 12px 0; }
+        .layer-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 7px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--surface-2);
+        }
+        .layer-row.is-active {
+            background: var(--surface-3);
+            border-color: var(--border-strong);
+            box-shadow: inset 3px 0 0 var(--rec);
+        }
+        .layer-row.is-hidden { opacity: .62; }
+        .layer-row .layer-pick {
+            flex: 1 1 auto;
+            min-width: 0;
+            text-align: left;
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--text);
+            cursor: pointer;
+            font: inherit;
+        }
+        .layer-row.is-active .layer-pick .layer-name { font-weight: 700; }
+        .layer-row .layer-name { display: block; font-size: 12px; }
+        .layer-row .layer-meta { display: block; font-size: 10px; color: var(--text-faint); }
+        .layer-row .btn-icon {
+            flex-shrink: 0;
+            width: 24px; height: 24px;
+            padding: 0;
+            background: transparent;
+            border-color: transparent;
+            color: var(--text-dim);
+            font-size: 13px;
+            line-height: 1;
+        }
+        .layer-row .btn-icon:hover { border-color: var(--border); }
+        .layer-lock { flex-shrink: 0; font-size: 11px; color: var(--text-faint); }
+
         #panel h3 {
             margin: 0 0 3px;
             font-size: 13px;
@@ -678,6 +762,10 @@
         /* ------------------------------------------------ Zone de travail */
         #workspace {
             flex: 1;
+            /* Le pincement est suivi doigt par doigt (voir app.js) : le
+             * navigateur ne doit pas s'en emparer pour faire defiler la page,
+             * y compris quand les doigts se posent a cote du canevas. */
+            touch-action: none;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -1755,6 +1843,9 @@
     <div id="export-screen" class="modal" style="display:none;">
         <div class="modal-box">
             <h2>Paramètres d'export</h2>
+            <!-- Une couche masquée ne s'exporte pas. Le découvrir au fichier
+                 livré serait tard : c'est ici que ça doit se lire. -->
+            <p id="export-layers-note" class="notice" style="display:none;"></p>
             <div class="form-group">
                 <label>Type d'export</label>
                 <select id="export-mode">
@@ -1969,14 +2060,42 @@
                 </svg>
                 <span>Tablette</span>
             </button>
+            <div class="btn-pair">
+                <button id="btn-undo" class="btn-quiet btn-tool" disabled
+                        title="Annuler la dernière trace (Ctrl + Z)" aria-label="Annuler">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M8 7.5 3.8 11.7 8 15.9"/>
+                        <path d="M4 11.7h9.4a5.6 5.6 0 0 1 0 11.2H9"/>
+                    </svg>
+                    <span>Annuler</span>
+                </button>
+                <button id="btn-redo" class="btn-quiet btn-tool" disabled
+                        title="Rétablir (Ctrl + Maj + Z)" aria-label="Rétablir">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="m16 7.5 4.2 4.2-4.2 4.2"/>
+                        <path d="M20 11.7h-9.4a5.6 5.6 0 0 0 0 11.2H15"/>
+                    </svg>
+                    <span>Rétablir</span>
+                </button>
+            </div>
             <button id="btn-clear" class="btn-quiet btn-tool"
-                    title="Effacer la zone de dessin" aria-label="Effacer le tracé">
+                    title="Effacer la couche active" aria-label="Effacer le tracé">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M4.6 15.1 11 8.7a2 2 0 0 1 2.8 0l3.1 3.1a2 2 0 0 1 0 2.8l-3.7 3.7H7.2l-2.6-2.6a1.6 1.6 0 0 1 0-2.6z"/>
                     <path d="M9.3 19.2 15 13.5"/>
                     <path d="m16.8 4.6 4.2 4.2M21 4.6l-4.2 4.2" class="mark"/>
                 </svg>
                 <span>Effacer</span>
+            </button>
+            <button id="btn-layer-new" class="btn-quiet btn-tool"
+                    title="Verrouille la couche courante et en ajoute une par-dessus"
+                    aria-label="Nouvelle couche">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m12 3.5 8 4-8 4-8-4z"/>
+                    <path d="m4 12.5 8 4 8-4"/>
+                    <path d="M18.5 17.5v5M16 20h5" class="mark"/>
+                </svg>
+                <span>Couche</span>
             </button>
             <button id="btn-rec" class="btn-rec btn-tool">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6" class="filled"/></svg>
@@ -2140,17 +2259,38 @@
                 <button id="panel-toggle" title="Replier le panneau" aria-label="Replier le panneau">›</button>
                 <span id="panel-tab-label">Pinceau</span>
                 <div class="panel-title-block">
+                    <div id="panel-tabs" role="tablist">
+                        <button id="tab-brush" class="panel-tab" role="tab"
+                                aria-selected="true" aria-controls="pane-brush">Pinceau</button>
+                        <button id="tab-layers" class="panel-tab" role="tab"
+                                aria-selected="false" aria-controls="pane-layers">Couches
+                            <span class="count" id="tab-layers-count">1</span></button>
+                    </div>
                     <h3 id="panel-title">Pinceau</h3>
                     <p class="hint" id="panel-hint"></p>
                 </div>
             </div>
-            <div id="panel-params"></div>
-            <div class="stack">
-                <button id="btn-texture" class="btn-quiet">Charger une texture PNG…</button>
-                <input type="file" id="texture-input" accept="image/png,image/*" style="display:none;">
-                <button id="btn-save-preset">Enregistrer comme preset</button>
-                <button id="btn-reset-brush" class="btn-quiet">Réinitialiser le pinceau</button>
-                <button id="btn-delete-brush" class="btn-danger">Supprimer ce pinceau</button>
+            <div id="pane-brush" class="panel-pane" role="tabpanel" aria-labelledby="tab-brush">
+                <div id="panel-params"></div>
+                <div class="stack">
+                    <button id="btn-texture" class="btn-quiet">Charger une texture PNG…</button>
+                    <input type="file" id="texture-input" accept="image/png,image/*" style="display:none;">
+                    <button id="btn-save-preset">Enregistrer comme preset</button>
+                    <button id="btn-reset-brush" class="btn-quiet">Réinitialiser le pinceau</button>
+                    <button id="btn-delete-brush" class="btn-danger">Supprimer ce pinceau</button>
+                </div>
+            </div>
+            <div id="pane-layers" class="panel-pane" role="tabpanel"
+                 aria-labelledby="tab-layers" style="display:none;">
+                <div id="layer-list"></div>
+                <div class="stack">
+                    <button id="btn-layer-add">＋ Nouvelle couche</button>
+                </div>
+                <p class="hint" style="padding: 10px 16px 0;">
+                    Haut de liste = premier plan. Choisir une couche la déverrouille :
+                    il y en a toujours exactement une active. L’œil la retire de l’écran
+                    <em>et</em> de l’export.
+                </p>
             </div>
         </aside>
     </div>
@@ -2238,6 +2378,10 @@
                 <dd>Zoom continu : glisser vers la droite pour zoomer, vers la gauche pour dézoomer.</dd>
                 <dt>Ctrl + molette / pincement</dt>
                 <dd>Zoom autour du pointeur.</dd>
+                <dt>Ctrl + Z</dt>
+                <dd>Annuler la dernière trace de la couche active. Sans limite de nombre — l’historique s’arrête au début de la couche.</dd>
+                <dt>Ctrl + Maj + Z</dt>
+                <dd>Rétablir le geste annulé. La pile se vide dès qu’une nouvelle trace est posée.</dd>
                 <dt>Ctrl + Alt + E</dt>
                 <dd>Ouvrir la fenêtre d’export.</dd>
                 <dt>Espace + clic</dt>
