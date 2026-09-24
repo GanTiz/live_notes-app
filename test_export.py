@@ -553,6 +553,84 @@ def test_the_pro_export_of_a_soundtrack_lays_a_wav_layer():
     return "dossier « ambiance » : " + ", ".join(names)
 
 
+def stack_over(top, bottom):
+    """Empile deux couches en alpha droit, comme un montage le ferait."""
+    ts, bs = top / 255.0, bottom / 255.0
+    ta, ba = ts[..., 3:4], bs[..., 3:4]
+    out_a = ta + ba * (1.0 - ta)
+    safe = np.maximum(out_a, 1e-6)
+    out_rgb = (ts[..., :3] * ta + bs[..., :3] * ba * (1.0 - ta)) / safe
+    return np.concatenate([out_rgb, out_a], axis=-1) * 255.0
+
+
+def test_the_pro_export_splits_the_layers_on_demand():
+    """Une couche de trace par fichier -- et l'empilement redonne l'unique.
+
+    C'est la propriete qui fait l'interet de la scission : reposer les N
+    fichiers au montage doit redonner exactement ce que la couche trace unique
+    montrait, meme duree et meme origine. Sans elle on livrerait N fichiers qui
+    se ressemblent, pas N couches. Le banc verifie aussi que l'ordre compte :
+    empiles a l'envers, ils donnent franchement autre chose.
+    """
+    directory = os.path.join(TMP, "scission")
+    post("/api/media/open", {"path": RUSH})
+    sheets = [{"strokes": [band(RED_LATE, True, 1200.0)], "clears": []},
+              {"strokes": [band(BLUE_EARLY, False, 0.0)], "clears": []}]
+
+    split = run_job(payload(mode="pro", folder="scinde", directory=directory,
+                            layers=sheets, strokes=[], splitLayers=True))
+    assert split["state"] == "done", split
+    names = sorted(os.path.basename(path) for path in split["files"])
+    assert names == ["scinde_media.mov", "scinde_preview.mp4",
+                     "scinde_trace_1.mov", "scinde_trace_2.mov"], names
+
+    whole = run_job(payload(mode="pro", folder="entier", directory=directory,
+                            layers=sheets, strokes=[]))
+    assert whole["state"] == "done", whole
+
+    low = read(os.path.join(directory, "scinde", "scinde_trace_1.mov"))
+    high = read(os.path.join(directory, "scinde", "scinde_trace_2.mov"))
+    single = read(os.path.join(directory, "entier", "entier_trace.mov"))
+
+    # Meme longueur : une couche dont le dernier trait tombe tot ne raccourcit
+    # pas son fichier, sinon l'empilement ne tomberait plus en face.
+    assert low.shape == high.shape == single.shape, (low.shape, high.shape, single.shape)
+
+    right = float(np.abs(stack_over(high, low) - single).max())
+    assert right < 6.0, "l'empilement ne redonne pas la couche unique (ecart %.1f)" % right
+
+    # L'ordre porte quelque chose, et c'est au croisement des deux bandes que
+    # ca se voit : ailleurs, les empiler a l'envers donne la meme image.
+    good = crossing(stack_over(high, low)[-1])
+    bad = crossing(stack_over(low, high)[-1])
+    assert float(np.abs(good - crossing(single[-1])).max()) < 6.0, \
+        "au croisement, l'empilement ne redonne pas la couche unique : %s" % (good.tolist(),)
+    assert float(np.abs(bad - good).max()) > 60.0, \
+        ("empile a l'envers, le croisement est identique : l'ordre ne porte rien"
+         " (%s contre %s)" % (bad.tolist(), good.tolist()))
+
+    # Et chacune garde sa temporalite : la couche du dessus commence tout de
+    # suite, celle du dessous a 1200 ms.
+    early = int(round(0.3 * FPS))
+    assert high[early, ..., 3].max() > 200, "la couche du dessus manque au debut"
+    assert low[early, ..., 3].max() < 8, "la couche du dessous apparait trop tot"
+    return ("%d fichiers ; au croisement, empiles %s, a l'envers %s"
+            % (len(names), good.astype(int).tolist(), bad.astype(int).tolist()))
+
+
+def test_a_single_layer_project_keeps_the_plain_name():
+    """Une seule couche : pas de numero, pas de fichier en plus, meme si la
+    case est cochee. La question ne se pose pas."""
+    directory = os.path.join(TMP, "scission_seule")
+    post("/api/media/open", {"path": RUSH})
+    state = run_job(payload(mode="pro", folder="seule", directory=directory,
+                            splitLayers=True))
+    assert state["state"] == "done", state
+    names = sorted(os.path.basename(path) for path in state["files"])
+    assert names == ["seule_media.mov", "seule_preview.mp4", "seule_trace.mov"], names
+    return "trois fichiers, « seule_trace.mov » sans numero"
+
+
 def test_the_pro_export_refuses_without_a_media():
     application.SESSION.clear_media()
     answer = post("/api/export", payload(mode="pro", directory=os.path.join(TMP, "vide")))
@@ -795,6 +873,8 @@ TESTS = [
     test_the_pro_export_lays_three_layers_in_one_folder,
     test_the_default_folder_carries_the_rush_name_and_the_hour,
     test_the_pro_export_of_a_soundtrack_lays_a_wav_layer,
+    test_the_pro_export_splits_the_layers_on_demand,
+    test_a_single_layer_project_keeps_the_plain_name,
     test_the_pro_export_refuses_without_a_media,
     test_a_second_pro_export_does_not_overwrite_the_first,
     test_the_export_renders_the_source_not_the_reading_copy,

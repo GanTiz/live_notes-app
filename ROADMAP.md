@@ -26,6 +26,8 @@
   la troisième.
 - Annuler / rétablir (`Ctrl + Z`, `Ctrl + Maj + Z`) — sans limite de nombre,
   la profondeur étant la couche active.
+- Export pro au choix en une couche de tracé aplatie ou **une couche par
+  fichier**, toutes à la durée de l'ensemble pour se réempiler sans recalage.
 - Zoom au pincement à deux doigts sur écran tactile, déplacement compris.
 - Raccourcis clavier et souris : taille et dureté du pinceau au glisser,
   gomme à la volée (`E`), zoom au pincement du pavé tactile et à `Ctrl` +
@@ -47,8 +49,6 @@
 
 - Édition fine d'une couche : entrer dedans, supprimer une trace précise,
   décaler une couche ou une trace dans le temps, en changer la vitesse.
-- Export pro avec **une couche de dessin par fichier**, dans la continuité de
-  l'export en trois couches existant.
 - Gestion des couches depuis la tablette (aujourd'hui le poste structure, la
   tablette dessine).
 - Renommer une couche.

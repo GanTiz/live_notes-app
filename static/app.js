@@ -3811,11 +3811,41 @@
    * Un son en fait partie : il n'a rien à montrer sous le tracé, mais sa bande
    * son est une couche à part entière, coupée aux mêmes bornes.
    */
+  /** Pourquoi le média ne peut pas être exporté, ou null s'il le peut.
+   *
+   *  Ce n'est pas la même chose que « il n'y a pas de média » : un rush qui
+   *  joue parfaitement à l'écran peut rester inconnu du serveur, qui est celui
+   *  qui l'encodera. Une option grisée sans raison lisible est une impasse —
+   *  la raison est affichée dans la fenêtre d'export, avec le remède. */
+  function mediaExportBlocker() {
+    if (!currentMedia) {
+      return 'Aucun média de fond : l’export pro le décompose en couches, il lui en faut un.';
+    }
+    if (!mediaNode) {
+      return 'Le média n’est pas encore posé dans le lecteur — laissez-lui un instant.';
+    }
+    if (!currentMedia.sourcePath && !currentMedia.servedPath) {
+      return 'Ce média a été ouvert depuis le navigateur : le serveur ne sait pas où il est '
+        + 'sur le disque, et c’est lui qui encode. Rouvrez-le par « Parcourir… » '
+        + 'pour pouvoir l’exporter.';
+    }
+    if (['video', 'image', 'audio'].indexOf(currentMedia.kind) < 0) {
+      return 'Un média de type « ' + (currentMedia.kind || 'inconnu')
+        + ' » ne se décompose pas en couches.';
+    }
+    return null;
+  }
+
   function exportableMedia() {
-    if (!currentMedia || !mediaNode) return null;
-    if (!currentMedia.sourcePath && !currentMedia.servedPath) return null;
-    if (['video', 'image', 'audio'].indexOf(currentMedia.kind) < 0) return null;
-    return currentMedia;
+    return mediaExportBlocker() ? null : currentMedia;
+  }
+
+  /** Les couches qui partiront réellement à l'export, du fond vers le premier
+   *  plan : celles qui sont visibles et qui portent au moins une trace. */
+  function exportableLayers() {
+    return layers.filter(function (layer) {
+      return layer.visible && layer.strokes.length;
+    });
   }
 
   /** Ce média a-t-il quelque chose à montrer sous le tracé ? */
@@ -3832,8 +3862,9 @@
     preview: 'Une seule vidéo, sans alpha : le tracé aplati sur ce que montre le canevas.',
     prores: 'Une seule vidéo ProRes 4444 — avec couche alpha, ou aplatie.',
     pro: 'Trois fichiers dans un sous-dossier : l’aperçu aplati, le média cadré, '
-      + 'le tracé en alpha. Même canevas, même cadence, même timecode de départ — '
-      + 'les couches se réempilent au montage sans recalage.'
+      + 'le tracé en alpha — ou un fichier par couche de tracé, à la demande. '
+      + 'Même canevas, même cadence, même timecode de départ, et la même durée '
+      + 'pour toutes : les couches se réempilent au montage sans recalage.'
   };
 
   function syncExportDialog() {
@@ -3845,12 +3876,27 @@
         + hidden + ' masquée(s).'
       : '';
 
+    // L'état du média est réévalué à chaque passage, pas seulement à
+    // l'ouverture : un rush qui finit de se préparer pendant que la fenêtre est
+    // ouverte doit dégriser l'export pro tout seul, au lieu d'obliger à la
+    // refermer pour la rouvrir.
+    var blocker = mediaExportBlocker();
+    var proNote = $('export-pro-note');
+    proNote.style.display = blocker ? '' : 'none';
+    proNote.textContent = blocker ? 'Export pro indisponible. ' + blocker : '';
+    $('export-mode').options[2].disabled = !!blocker;
+    if (blocker && $('export-mode').value === 'pro') $('export-mode').value = 'prores';
+
     var mode = $('export-mode').value;
     var pro = mode === 'pro';
     var h264 = mode === 'preview';
     var media = exportableMedia();
     var visual = visualMedia();
     var flatten = $('export-flatten');
+    var sheets = exportableLayers();
+    // Au-delà d'une couche seulement : sur un projet à une seule couche la
+    // question ne se pose pas, et la case serait du bruit.
+    $('export-split-row').style.display = pro && sheets.length > 1 ? '' : 'none';
 
     // « Sur le média » n'existe que si le serveur peut le rendre ; l'alpha, que
     // si le fichier sait le porter. Un son ne passe pas sous le tracé : il
@@ -3872,8 +3918,16 @@
     $('export-files').style.display = pro ? '' : 'none';
     if (pro) {
       var base = ($('export-name').value || defaultFolderName()).trim() || 'export';
-      $('export-files').textContent = base + '_preview.mp4 · ' + base + '_media.'
-        + (visual ? 'mov' : 'wav') + ' · ' + base + '_trace.mov';
+      var names = [base + '_preview.mp4', base + '_media.' + (visual ? 'mov' : 'wav')];
+      if (splitRequested()) {
+        // Numérotées du fond vers le premier plan, comme elles s'empilent.
+        for (var index = 1; index <= sheets.length; index++) {
+          names.push(base + '_trace_' + index + '.mov');
+        }
+      } else {
+        names.push(base + '_trace.mov');
+      }
+      $('export-files').textContent = names.join(' · ');
     }
     $('export-mode-hint').textContent = (EXPORT_HINTS[mode] || '')
       + (media ? '' : ' Aucun média exportable : le tracé ne peut être aplati '
@@ -3889,12 +3943,12 @@
   function openExportDialog() {
     if (isTablet || !ready || !visibleStrokeCount() || recording || previewing || viewing) return;
     var media = exportableMedia();
-    // L'export pro est fait de trois couches dont l'une est le média : sans
-    // média — pas même un son — il n'y a rien à décomposer.
-    $('export-mode').options[2].disabled = !media;
-    if (!media && $('export-mode').value === 'pro') $('export-mode').value = 'prores';
+    // L'export pro décompose un média : sans média — pas même un son — il n'y
+    // a rien à décomposer. C'est `syncExportDialog` qui grise l'option et dit
+    // pourquoi, ici comme à chaque changement.
     $('export-flatten').value = media ? 'media' : (config.alpha ? 'alpha' : 'solid');
     $('export-media-alpha').checked = false;
+    $('export-split').checked = false;
     $('export-width').value = config.width;
     $('export-height').value = config.height;
     $('export-fps').value = String(config.fps);
@@ -4166,6 +4220,15 @@
     $('export-screen').style.display = 'none';
   });
 
+  /** La scission n'a de sens qu'en export pro, et qu'au-delà d'une couche. */
+  function splitRequested() {
+    return $('export-mode').value === 'pro'
+      && $('export-split').checked
+      && exportableLayers().length > 1;
+  }
+
+  $('export-split').addEventListener('change', syncExportDialog);
+
   $('export-go').addEventListener('click', function () {
     $('export-screen').style.display = 'none';
     var mode = $('export-mode').value;
@@ -4184,6 +4247,8 @@
       background: config.background === CHECKER ? '#ffffff' : config.background,
       filename: $('export-name').value,
       folder: $('export-name').value,
+      // Une couche de tracé par fichier, au lieu d'une seule aplatie.
+      splitLayers: splitRequested(),
       directory: $('export-dir').value,
       durationMs: duration(),
       // Une couche masquée n'est pas envoyée : masquer et exclure de l'export

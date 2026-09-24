@@ -225,7 +225,7 @@ défaut, le fichier atterrit dans un dossier `live_notes/` de la bibliothèque
 Vidéos (Windows) ou Films (macOS) ; un sélecteur de dossier natif permet de
 choisir un autre emplacement et un autre nom à chaque export.
 
-### Export pro : trois couches, un dossier
+### Export pro : un dossier de couches
 
 L'export pro dépose dans un sous-dossier — nommé d'après le média et horodaté
 (`rush_20260802_143210`), renommable — trois fichiers construits sur le **même
@@ -248,8 +248,38 @@ deux essais du même rush se ressembleraient sinon.
 Les reposer l'un sur l'autre au montage redonne l'aperçu, à la compression
 près. L'intérêt est de garder les couches **indépendantes** : réétalonner le
 rush, changer l'opacité du tracé ou le décaler d'un cran ne demande pas de
-refaire le rendu. Sans média, l'export pro n'a rien à décomposer : l'option
-est grisée.
+refaire le rendu. Sans média, l'export pro n'a rien à décomposer : l'option est
+grisée, et la fenêtre dit laquelle des conditions manque — un rush qui joue
+parfaitement à l'écran peut rester inconnu du serveur, qui est celui qui
+encode, s'il a été ouvert depuis le navigateur plutôt que par « Parcourir… ».
+
+#### Une couche de tracé par fichier
+
+Dès qu'un projet passe la première couche, une case **« Scinder les couches de
+tracé en calques distincts »** apparaît dans la fenêtre d'export. Cochée, la
+couche `_trace` unique est remplacée par une par couche :
+
+| Fichier | Contenu |
+| --- | --- |
+| `<nom>_preview.mp4` | l'aperçu aplati, inchangé |
+| `<nom>_media.mov` | le média cadré, inchangé |
+| `<nom>_trace_1.mov` | la couche du **fond**, seule, en alpha |
+| `<nom>_trace_2.mov` | la couche au-dessus, seule, en alpha |
+| `<nom>_trace_3.mov` | … et ainsi de suite |
+
+La numérotation suit l'empilement, du fond vers le premier plan : `_trace_1`
+est celle qui passe sous toutes les autres. Seules les couches visibles et non
+vides sortent — une couche masquée n'a pas de fichier, et ne décale pas les
+numéros de celles qui suivent.
+
+**Toutes gardent la durée de l'ensemble**, pas la leur : une couche dont le
+dernier trait tombe à la cinquième seconde d'un projet qui en fait trente sort
+quand même en trente secondes, avec du transparent après. C'est ce qui permet
+de les déposer toutes sur la même première image au montage, sans rien recaler.
+Les reposer dans l'ordre redonne exactement la couche `_trace` unique.
+
+Sur un projet à une seule couche, la question ne se pose pas : pas de case, pas
+de numéro, le `_trace.mov` habituel.
 
 Deux points méritent d'être connus :
 

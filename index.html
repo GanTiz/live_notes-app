@@ -1860,12 +1860,15 @@
             <!-- Une couche masquée ne s'exporte pas. Le découvrir au fichier
                  livré serait tard : c'est ici que ça doit se lire. -->
             <p id="export-layers-note" class="notice" style="display:none;"></p>
+            <!-- Une option grisée sans raison lisible est une impasse : celle-ci
+                 dit laquelle des conditions manque, et comment y remédier. -->
+            <p id="export-pro-note" class="notice" style="display:none;"></p>
             <div class="form-group">
                 <label>Type d'export</label>
                 <select id="export-mode">
                     <option value="prores">ProRes 4444 (.mov) — montage</option>
                     <option value="preview">Aperçu H.264 (.mp4)</option>
-                    <option value="pro">Export pro — 3 couches dans un dossier</option>
+                    <option value="pro">Export pro — un dossier de couches</option>
                 </select>
                 <p id="export-mode-hint" class="notice"></p>
             </div>
@@ -1879,6 +1882,13 @@
                     <option value="solid">Fond uni — la couleur d'arrière-plan</option>
                     <option value="alpha">Rien — couche alpha (ProRes seulement)</option>
                 </select>
+            </div>
+            <!-- Ne s'affiche qu'au-delà d'une couche : sur un projet à une seule
+                 couche, la question ne se pose pas et la case serait du bruit. -->
+            <div class="checkbox-row" id="export-split-row" style="display:none;">
+                <input type="checkbox" id="export-split">
+                <label for="export-split">Scinder les couches de tracé en calques distincts
+                    (un fichier par couche)</label>
             </div>
             <div class="checkbox-row" id="export-media-alpha-row" style="display:none;">
                 <input type="checkbox" id="export-media-alpha">

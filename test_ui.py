@@ -1501,6 +1501,92 @@ def test_space_still_plays_and_pauses(ctx):
     return "Espace joue puis met en pause"
 
 
+def exported_payload(page):
+    """La charge d'export entiere, interceptee avant le depart."""
+    page.js("window.__alerts = [];"
+            "window.__realAlert = window.__realAlert || window.alert;"
+            "window.alert = function (text) { window.__alerts.push(text); };")
+    page.js("window.__exported = null;"
+            "window.__realFetch = window.__realFetch || window.fetch;"
+            "window.fetch = function (url, options) {"
+            "  if (String(url).indexOf('/api/export') === 0 && options && options.body) {"
+            "    window.__exported = JSON.parse(options.body);"
+            "    return Promise.resolve(new Response('{\"error\": \"banc\"}',"
+            "      {status: 200, headers: {'Content-Type': 'application/json'}}));"
+            "  }"
+            "  return window.__realFetch.apply(window, arguments);"
+            "};")
+    page.click("export-go")
+    page.pump(1.0)
+    raw = page.js("JSON.stringify(window.__exported)")
+    page.js("window.fetch = window.__realFetch; window.alert = window.__realAlert;")
+    assert raw and raw != "null", "l'export n'a pas ete declenche"
+    return json.loads(raw)
+
+
+def test_splitting_the_trace_layers_is_offered_only_beyond_one(ctx):
+    """La case ne s'offre qu'au-dela d'une couche, et le nom des fichiers suit.
+
+    Sur un projet a une seule couche la question ne se pose pas : pas de case,
+    pas de numero, exactement le dossier a trois fichiers d'avant.
+    """
+    page = ctx["page"]
+    open_on_server(ctx, ctx["rush_open_long"])
+    page.pump(0.8)
+
+    # Une seule couche qui porte quelque chose : on masque tout le reste.
+    fresh_layer(page)
+    draw_stroke(page, 0.4)
+    page.js("""(function () {
+      var rows = document.querySelectorAll('#layer-list .layer-row');
+      for (var i = 1; i < rows.length; i++) {
+        var row = rows[i];
+        if (row.className.indexOf('is-hidden') < 0) row.querySelector('button').click();
+      }
+    })()""")
+    page.pump(0.6)
+
+    page.click("btn-export")
+    page.pump(0.6)
+    page.js("document.getElementById('export-mode').value = 'pro';"
+            "document.getElementById('export-mode').dispatchEvent(new Event('change'));")
+    page.pump(0.5)
+    assert page.js("getComputedStyle(document.getElementById('export-mode')"
+                   ".options[2]).display") != "none", "l'export pro n'est pas propose"
+    assert page.js("document.getElementById('export-mode').options[2].disabled + ''") == "false", \
+        ("l'export pro est grise alors qu'un media est ouvert : %s"
+         % page.text("export-pro-note"))
+    assert page.display("export-split-row") == "none", \
+        "la case de scission s'offre sur un projet a une seule couche"
+    files = page.text("export-files")
+    assert "_trace.mov" in files and "_trace_1" not in files, files
+
+    # Deuxieme couche : la case apparait, et les noms se numerotent.
+    page.js("document.getElementById('export-cancel').click();")
+    page.pump(0.4)
+    page.click("btn-layer-new")
+    page.pump(0.4)
+    draw_stroke(page, 0.7)
+    page.click("btn-export")
+    page.pump(0.6)
+    page.js("document.getElementById('export-mode').value = 'pro';"
+            "document.getElementById('export-mode').dispatchEvent(new Event('change'));")
+    page.pump(0.5)
+    assert page.display("export-split-row") != "none", \
+        "la case de scission manque sur un projet a deux couches"
+
+    page.js("var box = document.getElementById('export-split');"
+            "box.checked = true; box.dispatchEvent(new Event('change'));")
+    page.pump(0.5)
+    files = page.text("export-files")
+    assert "_trace_1.mov" in files and "_trace_2.mov" in files and "_trace.mov" not in files, files
+
+    sent = exported_payload(page)
+    assert sent.get("splitLayers") is True, "la charge ne demande pas la scission"
+    assert len(sent.get("layers") or []) == 2, sent.get("layers")
+    return "case absente a une couche, presente et suivie a deux"
+
+
 def test_the_tablet_buttons_are_not_deaf_to_the_finger(ctx):
     """Les deux boutons isoles de l'interface tablette doivent recevoir le doigt.
 
@@ -1660,6 +1746,7 @@ TESTS = [
     test_a_v1_project_opens_as_a_single_layer,
     test_a_pinch_zooms_the_canvas_and_never_draws,
     test_space_still_plays_and_pauses,
+    test_splitting_the_trace_layers_is_offered_only_beyond_one,
     test_the_tablet_buttons_are_not_deaf_to_the_finger,
     test_the_toolbar_holds_on_one_row,
     test_the_tool_buttons_keep_their_icon,

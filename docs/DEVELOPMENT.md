@@ -158,7 +158,14 @@ pas — chaque écran a déjà le sien par les tracés relayés.
 référentiel — le canevas de tracé — et la même origine des temps — le point IN
 du média : `render` (le tracé, seul en alpha, aplati sur la couleur de fond ou
 sur le média) et `render_media` (le média seul, placé dans ce même canevas).
-L'export pro en enchaîne trois : aperçu, média, tracé.
+L'export pro en enchaîne trois : aperçu, média, tracé — ou 2 + N quand on
+demande une couche de tracé par fichier (`splitLayers`). Dans ce cas chaque
+couche part avec `layers` réduit à la sienne, mais garde le `durationMs` de
+l'ensemble (`total_duration_ms`) : sans ce plancher commun, une couche dont le
+dernier trait tombe tôt sortirait plus courte que les autres, et l'empilement au
+montage ne tomberait plus en face. `test_export.py` le vérifie par la propriété
+— empiler les fichiers en alpha droit redonne la couche unique, les empiler à
+l'envers donne franchement autre chose.
 
 Le placement du média n'est **pas** refait à la main : il est confié aux
 filtres FFmpeg (`crop`, `scale`, `pad`), décrits par la même arithmétique que

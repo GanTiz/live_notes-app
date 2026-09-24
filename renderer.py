@@ -667,7 +667,18 @@ def frame_count(payload, fps):
     donneraient deux fichiers d'une image d'ecart, et la superposition en post
     ne tomberait plus juste.
     """
-    last = 0.0
+    return max(1, int(math.ceil((total_duration_ms(payload) + TAIL_MS) * fps / 1000.0)))
+
+
+def total_duration_ms(payload):
+    """Duree du trace decrit par une charge, toutes couches confondues.
+
+    Sert aussi de plancher commun quand une couche sort dans son propre
+    fichier : sans lui, une couche dont le dernier trait tombe tot donnerait un
+    fichier plus court que les autres, et l'empilement au montage ne tomberait
+    plus en face.
+    """
+    last = float(payload.get("durationMs") or 0.0)
     for sheet in payload_sheets(payload):
         for stroke in sheet["strokes"]:
             if not isinstance(stroke, dict):
@@ -678,8 +689,7 @@ def frame_count(payload, fps):
                     last = max(last, float(points[-1].get("t") or 0.0))
                 except (AttributeError, TypeError, ValueError):
                     pass
-    duration_ms = max(float(payload.get("durationMs") or 0.0), last) + TAIL_MS
-    return max(1, int(math.ceil(duration_ms * fps / 1000.0)))
+    return last
 
 
 def _output_size(payload, codec):

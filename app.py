@@ -1100,14 +1100,33 @@ def _export_plan(payload, directory, media):
         return os.path.join(folder, "%s_%s.%s" % (name, suffix, extension))
 
     layer = "Son" if media.get("kind") == "audio" else "Média"
-    return [
+    steps = [
         Step("Aperçu", inside("preview", "mp4"), renderer.render,
              dict(payload, codec="h264", flatten="media", media=media)),
         Step(layer, inside("media", renderer.media_extension(media)), renderer.render_media,
              dict(payload, codec="prores4444", media=media)),
-        Step("Tracé", inside("trace", "mov"), renderer.render,
-             dict(payload, codec="prores4444", flatten="alpha", media=media)),
-    ], folder
+    ]
+
+    # Une couche de trace par fichier, au lieu d'une seule aplatie. La question
+    # ne se pose qu'au-dela d'une couche : un projet a une seule couche garde le
+    # nom sans numero, et le meme dossier a trois fichiers qu'avant.
+    sheets = [sheet for sheet in renderer.payload_sheets(payload) if sheet["strokes"]]
+    if not (payload.get("splitLayers") and len(sheets) > 1):
+        steps.append(Step("Tracé", inside("trace", "mov"), renderer.render,
+                          dict(payload, codec="prores4444", flatten="alpha", media=media)))
+        return steps, folder
+
+    # Toutes les couches gardent la duree de l'ensemble : c'est ce qui permet de
+    # les reposer au montage sans rien recaler. Une couche dont le dernier trait
+    # tombe tot donnerait sinon un fichier plus court que les autres. Elles sont
+    # numerotees du fond vers le premier plan, dans l'ordre ou elles s'empilent.
+    span = renderer.total_duration_ms(payload)
+    for index, sheet in enumerate(sheets, start=1):
+        steps.append(Step("Tracé %d" % index, inside("trace_%d" % index, "mov"),
+                          renderer.render,
+                          dict(payload, codec="prores4444", flatten="alpha", media=media,
+                               layers=[sheet], durationMs=span)))
+    return steps, folder
 
 
 @app.route("/api/export", methods=["POST"])
