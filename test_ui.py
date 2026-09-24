@@ -1587,6 +1587,76 @@ def test_splitting_the_trace_layers_is_offered_only_beyond_one(ctx):
     return "case absente a une couche, presente et suivie a deux"
 
 
+def test_a_browser_opened_media_says_why_it_cannot_be_exported(ctx):
+    """Un rush ouvert par le selecteur du navigateur joue, et ne s'exporte pas.
+
+    Le serveur ne sait pas ou il est sur le disque, et c'est lui qui encode.
+    L'export pro est donc grise -- mais « grise » sans raison est une impasse :
+    c'est le cas le plus deroutant des quatre, le rush est la et il joue.
+    """
+    page = ctx["page"]
+    page.attach_file("media-input", ctx["rush43"])
+    assert page.wait_for("!!document.getElementById('bg-media')"
+                         " && document.getElementById('bg-media').tagName === 'VIDEO'",
+                         timeout=15.0), "le rush du navigateur ne s'est pas installe"
+    # La fenetre de cadrage s'ouvre si le format differe : on la referme.
+    page.js("(function () {"
+            "  var screen = document.getElementById('crop-screen');"
+            "  if (screen && getComputedStyle(screen).display === 'flex') {"
+            "    document.getElementById('crop-cancel').click();"
+            "  }"
+            "})()")
+    page.pump(0.5)
+
+    fresh_layer(page)
+    draw_stroke(page, 0.45)
+    page.click("btn-export")
+    page.pump(0.8)
+
+    assert page.js("document.getElementById('export-mode').options[2].disabled + ''") == "true", \
+        "l'export pro est propose alors que le serveur ne connait pas le media"
+    said = page.text("export-pro-note")
+    assert "Parcourir" in said, \
+        "la raison du grisage ne dit pas quoi faire : %r" % said
+    assert "Aucun média" not in said, \
+        "« aucun média » pour un rush qui joue a l'écran : %r" % said
+    page.js("document.getElementById('export-cancel').click();")
+    page.pump(0.4)
+    return "grise, avec la raison et le remede"
+
+
+def test_removing_the_media_removes_it_from_the_server_too(ctx):
+    """Retirer le rush de l'ecran doit le retirer du serveur.
+
+    Ce que l'ecran montre et ce que le serveur tient sont deux choses, et c'est
+    la seconde que l'export encode. Les laisser diverger produit le pire des
+    defauts : un fichier livre juste en apparence, avec un rush invisible sous
+    le trace, sans que rien ne l'ait signale.
+    """
+    page = ctx["page"]
+    open_on_server(ctx, ctx["rush_open"])
+    page.pump(0.8)
+    assert (ctx["server"].get("/api/session") or {}).get("media", {}).get("sourcePath"), \
+        "le serveur n'a pas pris le rush : le banc ne prouverait rien"
+
+    page.click("tp-clear")
+    page.pump(1.2)
+    held = (ctx["server"].get("/api/session") or {}).get("media", {})
+    assert not held.get("sourcePath") and not held.get("servedPath"), \
+        "le serveur tient toujours le rush retire de l'ecran : %s" % held.get("sourcePath")
+
+    fresh_layer(page)
+    draw_stroke(page, 0.5)
+    page.click("btn-export")
+    page.pump(0.8)
+    assert page.js("document.getElementById('export-mode').options[2].disabled + ''") == "true", \
+        "l'export pro est propose sans media"
+    assert "Aucun média" in page.text("export-pro-note"), page.text("export-pro-note")
+    page.js("document.getElementById('export-cancel').click();")
+    page.pump(0.4)
+    return "retire de l'ecran et du serveur"
+
+
 def test_the_tablet_buttons_are_not_deaf_to_the_finger(ctx):
     """Les deux boutons isoles de l'interface tablette doivent recevoir le doigt.
 
@@ -1747,6 +1817,8 @@ TESTS = [
     test_a_pinch_zooms_the_canvas_and_never_draws,
     test_space_still_plays_and_pauses,
     test_splitting_the_trace_layers_is_offered_only_beyond_one,
+    test_a_browser_opened_media_says_why_it_cannot_be_exported,
+    test_removing_the_media_removes_it_from_the_server_too,
     test_the_tablet_buttons_are_not_deaf_to_the_finger,
     test_the_toolbar_holds_on_one_row,
     test_the_tool_buttons_keep_their_icon,

@@ -503,14 +503,27 @@
       // metadonnees les bornes qu'il avait capturees, et la derniere valeur
       // posee serait la plus ancienne.
       if (wired !== node) {
+        // L'element est retenu ici, et non relu dans `node` : les ecouteurs
+        // restent poses sur lui apres un `detach`, qui met `node` a null. Un
+        // `loadedmetadata` arrive en retard -- le rush qu'on vient de lacher
+        // finit de charger -- lisait alors la duree de rien.
+        var wiredNode = node;
         wired = node;
-        node.addEventListener('loadedmetadata', function () {
-          duration = isFinite(node.duration) ? node.duration : 0;
+        var live = function () { return node === wiredNode; };
+        wiredNode.addEventListener('loadedmetadata', function () {
+          if (!live()) return;
+          duration = isFinite(wiredNode.duration) ? wiredNode.duration : 0;
           settleRange();
         });
-        node.addEventListener('play', function () { armOutWatch(); paint(); });
-        node.addEventListener('pause', function () { disarmOutWatch(); paint(); });
-        node.addEventListener('seeked', paint);
+        wiredNode.addEventListener('play', function () {
+          if (!live()) return;
+          armOutWatch(); paint();
+        });
+        wiredNode.addEventListener('pause', function () {
+          if (!live()) return;
+          disarmOutWatch(); paint();
+        });
+        wiredNode.addEventListener('seeked', function () { if (live()) paint(); });
       }
 
       duration = isFinite(node.duration) ? node.duration : 0;

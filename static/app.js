@@ -2652,7 +2652,25 @@
         : 'Type de média non reconnu : ' + (file.type || file.name));
       return;
     }
+    // Le serveur tenait peut-être un autre rush : c'est le sien que l'export
+    // encode, et il ne doit pas rester sous un média que l'écran a remplacé.
+    forgetServerMedia();
     installMedia(URL.createObjectURL(file), file.name, kind, true);
+  }
+
+  /** Fait oublier au serveur le média qu'il tient.
+   *
+   *  Ce que l'écran montre et ce que le serveur tient sont deux choses, et
+   *  c'est la seconde que l'export encode. Les laisser diverger produit le
+   *  pire des défauts : un fichier livré juste en apparence, avec le mauvais
+   *  rush dessous, sans que rien ne l'ait signalé. */
+  function forgetServerMedia() {
+    if (isTablet) return;
+    appliedMediaKey = null;
+    currentMedia = null;
+    answeredFitQuestion = null;
+    fetch('/api/media', { method: 'DELETE' })
+      .catch(function () { /* le serveur n'en tenait peut-être aucun */ });
   }
 
   /**
@@ -2918,6 +2936,10 @@
     mediaType = null;
     mediaName = '';
     MediaTransport.detach();
+    // Le serveur le tenait aussi, et c'est le sien que l'export encode : le
+    // retirer seulement de l'écran laissait un rush invisible sous le tracé du
+    // fichier livré.
+    forgetServerMedia();
     status('Média retiré : le canevas retrouve son fond.');
   });
 
@@ -3817,17 +3839,24 @@
    *  joue parfaitement à l'écran peut rester inconnu du serveur, qui est celui
    *  qui l'encodera. Une option grisée sans raison lisible est une impasse —
    *  la raison est affichée dans la fenêtre d'export, avec le remède. */
+  var BROWSER_PICKED = 'Ce média a été ouvert par le sélecteur du navigateur : le serveur '
+    + 'ne sait pas où il est sur le disque, et c’est lui qui encode. Rouvrez-le par '
+    + '« Parcourir… » pour pouvoir l’exporter.';
+
   function mediaExportBlocker() {
     if (!currentMedia) {
-      return 'Aucun média de fond : l’export pro le décompose en couches, il lui en faut un.';
+      // Quelque chose joue à l'écran mais le serveur ne le connaît pas : c'est
+      // le repli navigateur (voir `loadMedia`), qui installe le média sans
+      // jamais passer par le serveur. C'est le cas le plus déroutant — le rush
+      // est là, il joue, et il n'est pourtant pas exportable.
+      return mediaNode ? BROWSER_PICKED
+        : 'Aucun média de fond : l’export pro le décompose en couches, il lui en faut un.';
     }
     if (!mediaNode) {
       return 'Le média n’est pas encore posé dans le lecteur — laissez-lui un instant.';
     }
     if (!currentMedia.sourcePath && !currentMedia.servedPath) {
-      return 'Ce média a été ouvert depuis le navigateur : le serveur ne sait pas où il est '
-        + 'sur le disque, et c’est lui qui encode. Rouvrez-le par « Parcourir… » '
-        + 'pour pouvoir l’exporter.';
+      return BROWSER_PICKED;
     }
     if (['video', 'image', 'audio'].indexOf(currentMedia.kind) < 0) {
       return 'Un média de type « ' + (currentMedia.kind || 'inconnu')
@@ -4410,8 +4439,11 @@
    *  n'est pas disponible, on retombe sur le champ fichier du navigateur. */
   function openMediaOnServer(fallbackId) {
     var fallback = function () {
-      status('Sélecteur natif indisponible — repli sur le navigateur '
-        + '(seuls les codecs reconnus par lui seront lisibles).');
+      // Dit dès maintenant ce que ce repli coûte : découvrir à l'export que
+      // le rush n'est pas exportable, après avoir dessiné dessus, est tard.
+      status('Sélecteur natif indisponible — repli sur le navigateur : seuls les codecs '
+        + 'qu’il reconnaît seront lisibles, et ce média ne pourra pas être exporté '
+        + '(le serveur ne saura pas où il est sur le disque).');
       $(fallbackId).click();
     };
     status('Sélection du média…');
