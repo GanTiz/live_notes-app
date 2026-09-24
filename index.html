@@ -1275,6 +1275,13 @@
             padding-left: 10px;
             margin-bottom: 16px;
         }
+        /* Une note qui explique une impossibilité doit se lire avant qu'on ait
+         * cherché le réglage manquant : elle se distingue des notes qui
+         * décrivent simplement ce qu'un choix produit. */
+        #export-pro-note {
+            color: var(--text);
+            border-left-color: var(--rec);
+        }
         /* Sous un réglage, la note explique ce que le choix produit : elle se
          * colle donc à lui plutôt que de flotter comme un paragraphe. */
         .form-group .notice { margin: 7px 0 0; }

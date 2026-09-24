@@ -3861,10 +3861,10 @@
   var EXPORT_HINTS = {
     preview: 'Une seule vidéo, sans alpha : le tracé aplati sur ce que montre le canevas.',
     prores: 'Une seule vidéo ProRes 4444 — avec couche alpha, ou aplatie.',
-    pro: 'Trois fichiers dans un sous-dossier : l’aperçu aplati, le média cadré, '
-      + 'le tracé en alpha — ou un fichier par couche de tracé, à la demande. '
+    pro: 'Un sous-dossier de couches : l’aperçu aplati, le média cadré, et le '
+      + 'tracé en alpha — en un seul fichier, ou un par couche de tracé. '
       + 'Même canevas, même cadence, même timecode de départ, et la même durée '
-      + 'pour toutes : les couches se réempilent au montage sans recalage.'
+      + 'pour toutes : elles se réempilent au montage sans recalage.'
   };
 
   function syncExportDialog() {
